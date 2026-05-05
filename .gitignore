@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+mcp-shims/node_modules/
+
+# task runtime data — logs may contain sensitive prompts/output
+.logs/
+
+# claude code session metadata for this project
+.claude/
+
+# editor / OS noise
+.DS_Store
+*.swp
+*.swo
+
+# secrets
+.env
+.env.local
+.env.*.local
+
+# install.sh writes timestamped backups when overwriting existing files
+*.bak.[0-9]*
+
+# python virtualenvs (in case anyone adds one for the web layer)
+venv/
+.venv/
+__pycache__/
+*.pyc

@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0e12">
+  <title>endy</title>
+  <style>
+    *,*::before,*::after { box-sizing: border-box; }
+    :root {
+      --bg: #0c0e12;
+      --bg-elev: #15181f;
+      --bg-elev-2: #1c2029;
+      --fg: #e7e9ee;
+      --fg-mute: #8d92a0;
+      --accent: #6ee7b7;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --info: #60a5fa;
+      --br: 10px;
+      --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; }
+    body { min-height: 100vh; -webkit-font-smoothing: antialiased; }
+
+    header.app-bar {
+      position: sticky; top: 0; z-index: 50;
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 16px;
+      background: var(--bg-elev); border-bottom: 1px solid #232838;
+      padding-top: max(14px, env(safe-area-inset-top));
+    }
+    header.app-bar h1 { margin: 0; font-size: 17px; letter-spacing: .5px; flex: 1; }
+    header.app-bar .pill { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: var(--bg-elev-2); color: var(--fg-mute); }
+    header.app-bar .pill.live { color: var(--accent); }
+    button.primary, button.danger {
+      border: none; padding: 9px 14px; border-radius: var(--br);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: #0c0e12; }
+    button.danger { background: var(--err); color: #fff; }
+    button.ghost { background: transparent; color: var(--fg-mute); border: 1px solid #2a2f3d; padding: 7px 12px; border-radius: var(--br); cursor: pointer; }
+    button.ghost:hover { color: var(--fg); border-color: #3a4055; }
+
+    main { padding: 12px 16px 80px; max-width: 920px; margin: 0 auto; }
+    section h2 { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--fg-mute); margin: 18px 0 8px; }
+
+    ul.tasks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    li.task {
+      background: var(--bg-elev); border: 1px solid #232838; border-radius: var(--br);
+      padding: 12px 14px; cursor: pointer; transition: border-color .15s;
+    }
+    li.task:hover { border-color: #3a4055; }
+    li.task .row1 { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px; }
+    li.task .id { color: var(--fg-mute); }
+    li.task .agent { color: var(--info); font-weight: 600; }
+    li.task .persona { color: var(--fg-mute); }
+    li.task .runtime { margin-left: auto; color: var(--fg-mute); font-size: 12px; }
+    li.task .status { font-size: 11px; padding: 2px 7px; border-radius: 4px; font-weight: 700; }
+    .status.RUN, .status.RUNNING, .status.PENDING { background: rgba(96,165,250,.15); color: var(--info); }
+    .status.DONE { background: rgba(110,231,183,.15); color: var(--accent); }
+    .status.DONE-ERR, .status.FAILED { background: rgba(251,191,36,.15); color: var(--warn); }
+    li.task .last { margin-top: 8px; color: var(--fg-mute); font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    li.task .cwd { font-size: 11.5px; color: var(--fg-mute); margin-top: 2px; }
+
+    /* dialogs */
+    dialog { background: var(--bg-elev); color: var(--fg); border: 1px solid #232838; border-radius: 14px; padding: 0; max-width: 92vw; width: 560px; box-shadow: 0 20px 80px rgba(0,0,0,.6); }
+    dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
+    dialog header { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid #232838; gap: 12px; }
+    dialog header h3 { margin: 0; font-size: 15px; flex: 1; }
+    dialog form { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+    dialog label { font-size: 12px; color: var(--fg-mute); display: flex; flex-direction: column; gap: 4px; }
+    dialog input, dialog select, dialog textarea {
+      background: var(--bg); color: var(--fg); border: 1px solid #2a2f3d; border-radius: 8px;
+      padding: 9px 10px; font: inherit; font-size: 14px; width: 100%;
+    }
+    dialog input:focus, dialog select:focus, dialog textarea:focus { outline: 2px solid var(--info); outline-offset: -1px; }
+    dialog textarea { resize: vertical; font-family: var(--mono); font-size: 13px; min-height: 140px; }
+    dialog .actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid #232838; }
+
+    /* log dialog */
+    dialog.log-view { width: 92vw; max-width: 1100px; }
+    dialog.log-view header h3 { font-family: var(--mono); font-size: 13px; }
+    dialog.log-view .meta { padding: 10px 16px; font-size: 12px; color: var(--fg-mute); display: flex; flex-wrap: wrap; gap: 14px; border-bottom: 1px solid #232838; }
+    dialog.log-view .meta .k { color: var(--fg-mute); }
+    dialog.log-view .meta .v { color: var(--fg); font-family: var(--mono); }
+    dialog.log-view pre { margin: 0; padding: 14px 16px; max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+
+    .empty { color: var(--fg-mute); font-size: 13px; padding: 12px; text-align: center; }
+
+    @media (max-width: 600px) {
+      main { padding: 8px 10px 72px; }
+      li.task { padding: 10px 12px; }
+      dialog { width: 96vw; max-width: 96vw; }
+      dialog form { padding: 10px 12px; }
+      dialog .actions { padding: 10px 12px; }
+      dialog.log-view pre { font-size: 11.5px; padding: 10px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-bar">
+    <h1>endy</h1>
+    <span id="status-pill" class="pill">connecting…</span>
+    <button id="btn-new" class="primary">+&nbsp;Spawn</button>
+  </header>
+
+  <main>
+    <section>
+      <h2>Running</h2>
+      <ul id="list-running" class="tasks"></ul>
+    </section>
+    <section>
+      <h2>Recent</h2>
+      <ul id="list-recent" class="tasks"></ul>
+    </section>
+  </main>
+
+  <!-- New-task dialog -->
+  <dialog id="dlg-new">
+    <header><h3>Spawn a new task</h3><button class="ghost" data-close>×</button></header>
+    <form id="form-new">
+      <label>Agent
+        <select name="agent" required>
+          <option value="opencode">opencode</option>
+          <option value="cmd">cmd (CommandCode)</option>
+          <option value="hermes">hermes</option>
+          <option value="claude">claude (when re-enabled)</option>
+        </select>
+      </label>
+      <label>Persona <span style="color:#5a6172">(optional — opencode personas only)</span>
+        <input name="persona" placeholder="refactor / test-writer / blank for ad-hoc">
+      </label>
+      <label>Working dir <span style="color:#5a6172">(optional)</span>
+        <input name="cwd" placeholder="/path/to/project — leave blank for $HOME">
+      </label>
+      <label>Prompt
+        <textarea name="prompt" required placeholder="Self-contained task. Include file paths, acceptance criteria, failure policy."></textarea>
+      </label>
+      <label style="flex-direction: row; align-items: center; gap: 8px;">
+        <input type="checkbox" name="full_auto" checked style="width:auto;"> Full-auto (skip permission prompts)
+      </label>
+      <div class="actions">
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Spawn</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Log-view dialog -->
+  <dialog id="dlg-log" class="log-view">
+    <header>
+      <h3 id="log-title">task-…</h3>
+      <button id="log-kill" class="danger" style="font-size: 12px; padding: 6px 10px;">Kill</button>
+      <button class="ghost" data-close>×</button>
+    </header>
+    <div class="meta" id="log-meta"></div>
+    <pre id="log-pre"></pre>
+  </dialog>
+
+  <script>
+    const $ = sel => document.querySelector(sel);
+
+    // ── status pill (connection liveness) ─────────────────────────────────
+    const pill = $("#status-pill");
+    let evtSource;
+    function connectEvents() {
+      if (evtSource) evtSource.close();
+      evtSource = new EventSource("/api/events");
+      evtSource.addEventListener("open", () => { pill.textContent = "live"; pill.classList.add("live"); });
+      evtSource.addEventListener("error", () => { pill.textContent = "reconnecting…"; pill.classList.remove("live"); });
+      evtSource.addEventListener("tasks", e => {
+        try { renderTasks(JSON.parse(e.data)); } catch {}
+      });
+    }
+
+    // ── render task list ──────────────────────────────────────────────────
+    const fmtRuntime = secs => {
+      if (secs < 60) return `${secs}s`;
+      if (secs < 3600) return `${Math.floor(secs/60)}m${String(secs%60).padStart(2,"0")}s`;
+      if (secs < 86400) return `${Math.floor(secs/3600)}h${String(Math.floor((secs%3600)/60)).padStart(2,"0")}m`;
+      return `${Math.floor(secs/86400)}d`;
+    };
+    const fmtCwd = (cwd, max=44) => {
+      if (!cwd) return "—";
+      if (cwd.length <= max) return cwd;
+      return "…" + cwd.slice(-(max-1));
+    };
+
+    function taskItem(t) {
+      const li = document.createElement("li");
+      li.className = "task";
+      li.dataset.id = t.task_id;
+      li.innerHTML = `
+        <div class="row1">
+          <span class="status ${t.status.split('(')[0]}">${t.status}</span>
+          <span class="agent">${t.agent}</span>
+          <span class="persona">${t.persona || "ad-hoc"}</span>
+          <span class="runtime">${fmtRuntime(t.runtime_s)}</span>
+        </div>
+        <div class="last">${t.last ? escapeHtml(t.last) : "—"}</div>
+        <div class="cwd">${escapeHtml(fmtCwd(t.cwd))} · <code style="color:#5a6172">${t.task_id}</code></div>`;
+      li.addEventListener("click", () => openLog(t.task_id));
+      return li;
+    }
+
+    function renderTasks(tasks) {
+      const running = tasks.filter(t => t.status === "RUNNING" || t.status === "PENDING");
+      const recent = tasks.filter(t => !(t.status === "RUNNING" || t.status === "PENDING")).slice(0, 25);
+      const $r = $("#list-running"), $rec = $("#list-recent");
+      $r.innerHTML = running.length ? "" : `<div class="empty">No running tasks. Tap “+ Spawn” to start one.</div>`;
+      running.forEach(t => $r.appendChild(taskItem(t)));
+      $rec.innerHTML = recent.length ? "" : `<div class="empty">No recent tasks.</div>`;
+      recent.forEach(t => $rec.appendChild(taskItem(t)));
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    }
+
+    // ── new task dialog ───────────────────────────────────────────────────
+    const dlgNew = $("#dlg-new");
+    $("#btn-new").addEventListener("click", () => dlgNew.showModal());
+    document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", e => {
+      e.preventDefault(); e.target.closest("dialog").close();
+    }));
+
+    $("#form-new").addEventListener("submit", async e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const body = {
+        agent:    fd.get("agent"),
+        persona:  fd.get("persona"),
+        cwd:      fd.get("cwd"),
+        prompt:   fd.get("prompt"),
+        full_auto: fd.get("full_auto") ? "true" : "false",
+      };
+      const submitBtn = e.target.querySelector("button[type=submit]");
+      submitBtn.disabled = true; submitBtn.textContent = "Spawning…";
+      try {
+        const res = await fetch("/api/tasks", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || data.stderr || "spawn failed");
+        e.target.reset();
+        dlgNew.close();
+      } catch (err) {
+        alert("Spawn failed:\n" + err.message);
+      } finally {
+        submitBtn.disabled = false; submitBtn.textContent = "Spawn";
+      }
+    });
+
+    // ── log view dialog ───────────────────────────────────────────────────
+    const dlgLog = $("#dlg-log");
+    let logEvtSource;
+    let currentLogTaskId = null;
+
+    async function openLog(tid) {
+      currentLogTaskId = tid;
+      $("#log-title").textContent = `task-${tid}`;
+      $("#log-pre").textContent = "loading…";
+      $("#log-meta").textContent = "";
+      dlgLog.showModal();
+
+      // Initial dump of the last 200 lines
+      const res = await fetch(`/api/tasks/${tid}`);
+      const d = await res.json();
+      $("#log-meta").innerHTML = `
+        <div><span class="k">agent</span> <span class="v">${escapeHtml(d.agent)}</span></div>
+        <div><span class="k">persona</span> <span class="v">${escapeHtml(d.persona || "ad-hoc")}</span></div>
+        <div><span class="k">cwd</span> <span class="v">${escapeHtml(d.cwd || "—")}</span></div>
+        <div><span class="k">spawned</span> <span class="v">${escapeHtml(d.spawned_at)}</span></div>
+        <div><span class="k">runtime</span> <span class="v">${fmtRuntime(d.runtime_s)}</span></div>
+        <div><span class="k">status</span> <span class="v">${escapeHtml(d.status)}</span></div>`;
+      const pre = $("#log-pre");
+      pre.textContent = d.log_tail || "(empty log)";
+      pre.scrollTop = pre.scrollHeight;
+
+      if (logEvtSource) logEvtSource.close();
+      logEvtSource = new EventSource(`/api/tasks/${tid}/stream`);
+      logEvtSource.addEventListener("message", e => {
+        try {
+          const o = JSON.parse(e.data);
+          if (o.line !== undefined) {
+            pre.textContent += o.line + "\n";
+            pre.scrollTop = pre.scrollHeight;
+          }
+        } catch {}
+      });
+      logEvtSource.addEventListener("end", () => { logEvtSource.close(); });
+      logEvtSource.addEventListener("error", () => { /* will reconnect or end */ });
+    }
+
+    dlgLog.addEventListener("close", () => { if (logEvtSource) logEvtSource.close(); currentLogTaskId = null; });
+
+    $("#log-kill").addEventListener("click", async () => {
+      if (!currentLogTaskId) return;
+      if (!confirm(`Kill task ${currentLogTaskId}?`)) return;
+      const res = await fetch(`/api/tasks/${currentLogTaskId}`, { method: "DELETE" });
+      const d = await res.json();
+      if (d.rc === 0) {
+        $("#log-pre").textContent += "\n[endy-watch] killed by user\n";
+      } else {
+        alert("Kill failed:\n" + (d.stderr || JSON.stringify(d)));
+      }
+    });
+
+    // ── boot ──────────────────────────────────────────────────────────────
+    fetch("/api/tasks").then(r => r.json()).then(renderTasks);
+    connectEvents();
+  </script>
+</body>
+</html>
