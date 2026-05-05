@@ -1,0 +1,4 @@
+interface:
+  display_name: "endy-delegate"
+  short_description: "Delegate to endy subagents — OpenCode, CommandCode, Claude Code"
+  default_prompt: "Use $endy-delegate to hand off this task to the right subagent (short via bash, long via tmux)."

@@ -1,0 +1,37 @@
+# =============================================================================
+# Codex config additions for endy.
+# Append (do not replace) this block to ~/.codex/config.toml.
+# scripts/install.sh handles this for you with a backup + idempotent re-runs.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Hybrid mode: subagent delegation runs through bash + the `endy-delegate`
+# skill (short blocking calls) and `scripts/spawn-long-task.sh` (long detached
+# runs). This is the active path.
+#
+# The MCP shim option below is left in place (commented out) — flip it on if
+# you ever want Codex's planner to see `delegate_to_opencode` etc. as
+# first-class tools instead of relying on bash. See mcp-shims/README.md.
+# -----------------------------------------------------------------------------
+
+# [mcp_servers.opencode]
+# command = "node"
+# args = ["__ENDY_ROOT__/mcp-shims/agent-mcp.mjs"]
+# env = { AGENT_NAME = "opencode", AGENT_BIN = "/path/to/opencode", AGENT_RUN_MODE = "opencode" }
+
+# [mcp_servers.commandcode]
+# command = "node"
+# args = ["__ENDY_ROOT__/mcp-shims/agent-mcp.mjs"]
+# env = { AGENT_NAME = "commandcode", AGENT_BIN = "cmd", AGENT_RUN_MODE = "commandcode" }
+
+# [mcp_servers.claude-code]
+# command = "node"
+# args = ["__ENDY_ROOT__/mcp-shims/agent-mcp.mjs"]
+# env = { AGENT_NAME = "claude-code", AGENT_BIN = "claude", AGENT_RUN_MODE = "claude-code" }
+
+# Hermes (Nous Research) — alternative path: Hermes ships its own MCP server
+# (`hermes mcp serve`) so a shim is unnecessary if you go this route.
+# Uncomment to wire it in directly without a shim.
+# [mcp_servers.hermes]
+# command = "hermes"
+# args = ["mcp", "serve"]

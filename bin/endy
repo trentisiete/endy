@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# endy — single entry point to the endy multi-agent stack.
+#
+# Subcommands group together the underlying scripts so you have one CLI
+# to remember. Tab completion: see scripts/endy-completion.sh (TODO).
+#
+# Lifecycle
+#   endy install                      Symlink configs/skills/agents into ~/. (idempotent.)
+#   endy start                        Open the 'endy' tmux session (orchestrator + opencode serve).
+#   endy stop                         Kill the tmux session.
+#   endy status                       Show tmux + Codex MCP + Tailscale status.
+#   endy doctor                       Check that every agent CLI is installed and authed.
+#
+# Agents (interactive — current cwd is the agent's project root)
+#   endy codex [args]                 Start a Codex session here. Endy context is loaded
+#                                     globally via ~/.codex/AGENTS.md (see 'endy install').
+#   endy opencode [args]              Start OpenCode here.
+#   endy cmd [args]                   Start CommandCode here.
+#   endy hermes [args]                Start Hermes here.
+#   endy <agent> --root               Run from the endy project root instead of cwd
+#                                     (full endy context, ignore current project).
+#
+# Tasks
+#   endy spawn <agent> [opts] -- <prompt>      Long unsupervised task in a tmux window.
+#                                              Wraps scripts/spawn-long-task.sh; passes
+#                                              --full-auto by default unless --supervised.
+#   endy ask <agent> [opts] <prompt>           Short blocking call. Output to stdout.
+#
+# Watching
+#   endy watch                        Read-only attach to the tmux session.
+#   endy watch list                   Enriched status table.
+#   endy watch log <id>               Follow one task's log (less +F).
+#   endy watch attach [<id>]          Read-only attach, optionally focusing a task window.
+#   endy watch panel [--all]          Tile view of running tasks.
+#   endy watch kill <id>              Kill a stuck task.
+#
+# Web dashboard
+#   endy web                          Start the web dashboard. Binds to your
+#                                     Tailnet IP by default (so the phone can
+#                                     reach it via Tailscale, no public exposure).
+#   endy web --localhost              Bind to 127.0.0.1 only.
+#   endy web --host <ip> --port <n>   Custom bind. Default port: 9120.
+#
+# Help
+#   endy help [<topic>]               This text or, with a topic, more detail.
+
+set -u
+
+# Resolve the endy project root, following any symlinks. macOS doesn't ship
+# a `readlink -f`, so we dereference manually. This must work whether the
+# script is invoked via its absolute path inside the repo or via a symlink
+# in PATH (e.g. ~/.local/bin/endy).
+_endy_self="${BASH_SOURCE[0]}"
+while [[ -L "$_endy_self" ]]; do
+  _endy_dir="$(cd "$(dirname "$_endy_self")" && pwd)"
+  _endy_self="$(readlink "$_endy_self")"
+  [[ "$_endy_self" != /* ]] && _endy_self="$_endy_dir/$_endy_self"
+done
+ENDY_ROOT="$(cd "$(dirname "$_endy_self")/.." && pwd)"
+unset _endy_self _endy_dir
+SCRIPTS="${ENDY_ROOT}/scripts"
+SESSION="endy"
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+die() { echo "endy: $*" >&2; exit 1; }
+
+show_help() {
+  sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# Run an agent CLI with the endy project as the cwd if --root is passed,
+# otherwise stay where we are. Either way, the AGENTS.md mechanism gives
+# the agent its endy context.
+run_agent() {
+  local bin="$1"; shift
+  local target_cwd="$(pwd)"
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root) target_cwd="$ENDY_ROOT"; shift ;;
+      *)      args+=("$1"); shift ;;
+    esac
+  done
+  cd "$target_cwd" || die "cannot cd to $target_cwd"
+  exec "$bin" ${args[@]+"${args[@]}"}
+}
+
+# ---------------------------------------------------------------------------
+# subcommands
+# ---------------------------------------------------------------------------
+
+cmd_install()  { exec "${SCRIPTS}/install.sh" "$@"; }
+cmd_start()    { exec "${SCRIPTS}/start.sh"   "$@"; }
+cmd_status()   { exec "${SCRIPTS}/status.sh"  "$@"; }
+cmd_watch()    { exec "${SCRIPTS}/endy-watch.sh" "$@"; }
+cmd_web()      { exec python3 "${ENDY_ROOT}/web/server.py" "$@"; }
+
+cmd_stop() {
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "endy session stopped."
+  else
+    echo "endy session not running."
+  fi
+}
+
+cmd_doctor() {
+  local ok=1
+  printf 'tmux ............ '
+  if command -v tmux >/dev/null; then printf '✓ %s\n' "$(tmux -V)"; else printf '✗ missing\n'; ok=0; fi
+  for bin in codex opencode cmd hermes; do
+    printf '%-15s ' "$bin"
+    if command -v "$bin" >/dev/null; then
+      printf '✓ %s\n' "$("$bin" --version 2>/dev/null | head -1 || echo installed)"
+    else
+      printf '✗ not installed\n'; ok=0
+    fi
+  done
+  printf 'AGENTS.md ....... '
+  if [[ -L "${HOME}/.codex/AGENTS.md" || -f "${HOME}/.codex/AGENTS.md" ]]; then
+    printf '✓ ~/.codex/AGENTS.md\n'
+  else
+    printf '✗ not installed (run: endy install)\n'; ok=0
+  fi
+  printf 'tmux session .... '
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    printf '✓ running\n'
+  else
+    printf '· down (run: endy start)\n'
+  fi
+  [[ "$ok" == "1" ]] || exit 1
+}
+
+cmd_spawn() {
+  local agent="${1:-}"
+  [[ -n "$agent" ]] || die "usage: endy spawn <agent> [opts] -- <prompt>"
+  shift
+
+  # Default: --full-auto. User can override with --supervised.
+  local supervised=0
+  local prompt=""
+  local extra=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --supervised) supervised=1; shift ;;
+      --) shift; prompt="$*"; break ;;
+      *) extra+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ -z "$prompt" ]]; then
+    # Allow piping: endy spawn opencode [opts] < prompt.txt
+    if [[ ! -t 0 ]]; then
+      prompt="$(cat)"
+    else
+      die "no prompt — pass after '--' or pipe via stdin"
+    fi
+  fi
+
+  local args=(--agent "$agent" ${extra[@]+"${extra[@]}"} --prompt "$prompt")
+  [[ "$supervised" == "0" ]] && args+=(--full-auto)
+  exec "${SCRIPTS}/spawn-long-task.sh" "${args[@]}"
+}
+
+cmd_ask() {
+  # Short blocking call. Output goes to current stdout.
+  local agent="${1:-}"
+  [[ -n "$agent" ]] || die "usage: endy ask <agent> [opts] <prompt>"
+  shift
+
+  local extra=()
+  local prompt=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model) extra+=("$1" "$2"); shift 2 ;;
+      --persona|--agent|--skills) extra+=("$1" "$2"); shift 2 ;;
+      *) prompt+="${prompt:+ }$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$prompt" ]] || { [[ ! -t 0 ]] && prompt="$(cat)"; }
+  [[ -n "$prompt" ]] || die "no prompt provided"
+
+  case "$agent" in
+    codex)
+      exec codex exec ${extra[@]+"${extra[@]}"} "$prompt" ;;
+    opencode)
+      exec opencode run ${extra[@]+"${extra[@]}"} "$prompt" ;;
+    cmd|commandcode)
+      exec cmd --skip-onboarding --trust ${extra[@]+"${extra[@]}"} -p "$prompt" ;;
+    hermes)
+      exec hermes chat -Q --accept-hooks ${extra[@]+"${extra[@]}"} -q "$prompt" ;;
+    claude)
+      exec claude ${extra[@]+"${extra[@]}"} -p "$prompt" ;;
+    *)
+      die "unknown agent: $agent" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+case "${1:-help}" in
+  install)  shift; cmd_install "$@" ;;
+  start)    shift; cmd_start "$@" ;;
+  stop)     shift; cmd_stop "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  doctor)   shift; cmd_doctor "$@" ;;
+  watch)    shift; cmd_watch "$@" ;;
+  web)      shift; cmd_web "$@" ;;
+  spawn)    shift; cmd_spawn "$@" ;;
+  ask)      shift; cmd_ask "$@" ;;
+
+  codex)    shift; run_agent codex "$@" ;;
+  opencode) shift; run_agent opencode "$@" ;;
+  cmd|commandcode) shift; run_agent cmd "$@" ;;
+  hermes)   shift; run_agent hermes "$@" ;;
+  claude)   shift; run_agent claude "$@" ;;
+
+  help|-h|--help) shift; show_help ;;
+
+  '') show_help ;;
+  *)
+    echo "endy: unknown subcommand '$1' — try 'endy help'" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,13 @@
+{
+  "name": "endy-mcp-shims",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "stdio MCP shims wrapping coding-agent CLIs (opencode, cmd, claude) for Codex orchestration",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

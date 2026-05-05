@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Spawn a long-running endy subagent task in a detached tmux window.
+#
+# Usage:
+#   spawn-long-task.sh --agent <opencode|cmd|claude|hermes>
+#                      [--persona <name>]              # opencode: --agent; hermes: --skills; cmd: ignored (no CLI flag)
+#                      [--model <model>]
+#                      [--cwd <dir>]
+#                      [--full-auto]                   # auto-approve permission prompts
+#                      [--max-turns <n>]               # cmd & hermes only; raise the tool-call ceiling
+#                      ( --prompt "<text>" | --prompt-file <path> )
+#
+# Output (stdout, machine-parseable):
+#   TASK_ID=<id>
+#   TMUX_WINDOW=endy:task-<id>
+#   LOG=<absolute path>
+#
+# Exit code:
+#   0  task spawned (says nothing about success of the task itself)
+#   2  bad arguments
+#   3  tmux session 'endy' not running — run scripts/start.sh first
+#
+# Implementation note: the prompt is persisted to a file and the inner shell
+# command reads it back via "$(cat <file>)" at runtime, so the agent
+# invocation that tmux launches is short (a few hundred bytes regardless of
+# prompt size). This avoids the tmux send-keys bug where pasting a 2KB+
+# prompt character-by-character into a shell prompt could hang or get
+# interleaved.
+
+set -euo pipefail
+
+ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="${ENDY_ROOT}/.logs"
+SESSION="endy"
+
+agent=""
+persona=""
+model=""
+cwd="$(pwd)"
+prompt=""
+prompt_file=""
+full_auto=0
+resume_id=""
+parent_task=""
+# Default 200: cmd's hidden --max-turns silently caps complex tool-using
+# research at 10 unless raised (verified May 2026 v0.25.1). 200 is
+# generous enough for any reasonable agentic chain. User-pass --max-turns
+# overrides; agents that ignore the flag (opencode, claude) just drop it.
+max_turns=200
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)        agent="$2";        shift 2 ;;
+    --persona)      persona="$2";      shift 2 ;;
+    --model)        model="$2";        shift 2 ;;
+    --cwd)          cwd="$2";          shift 2 ;;
+    --prompt)       prompt="$2";       shift 2 ;;
+    --prompt-file)  prompt_file="$2";  shift 2 ;;
+    --full-auto)    full_auto=1;       shift   ;;
+    --max-turns)    max_turns="$2";    shift 2 ;;
+    --resume)       resume_id="$2";    shift 2 ;;
+    --parent-task)  parent_task="$2";  shift 2 ;;
+    -h|--help)
+      sed -n '2,28p' "$0"; exit 0 ;;
+    *)
+      echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$agent" ]] || { echo "--agent required (opencode|cmd|claude|hermes)" >&2; exit 2; }
+[[ -n "$prompt" || -n "$prompt_file" ]] || \
+  { echo "--prompt or --prompt-file required" >&2; exit 2; }
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "tmux session '$SESSION' not running — run ${ENDY_ROOT}/scripts/start.sh first" >&2
+  exit 3
+fi
+
+mkdir -p "$LOG_DIR"
+
+TASK_ID="$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 2)"
+PROMPT_PATH="${LOG_DIR}/task-${TASK_ID}.prompt.md"
+LOG_PATH="${LOG_DIR}/task-${TASK_ID}.log"
+META_PATH="${LOG_DIR}/task-${TASK_ID}.meta"
+
+if [[ -n "$prompt_file" ]]; then
+  cp "$prompt_file" "$PROMPT_PATH"
+else
+  printf '%s\n' "$prompt" > "$PROMPT_PATH"
+fi
+
+# Build agent argv (everything EXCEPT the final prompt argument).
+case "$agent" in
+  opencode)
+    cmd_argv=(opencode run)
+    [[ -n "$resume_id" ]] && cmd_argv+=(--session "$resume_id")
+    [[ -n "$persona" ]] && cmd_argv+=(--agent "$persona")
+    [[ -n "$model"   ]] && cmd_argv+=(--model "$model")
+    [[ "$full_auto" == "1" ]] && cmd_argv+=(--dangerously-skip-permissions)
+    ;;
+  cmd|commandcode)
+    # cmd has no --model or --agent CLI flag (slash commands only).
+    # Personas live at ~/.commandcode/agents/<name>.md but selection is
+    # interactive-only — for non-interactive use, send ad-hoc inline prompts.
+    # Pre-auth required: cmd login → ~/.commandcode/auth.json must exist.
+    # --max-turns is undocumented in --help but accepted (verified May 2026 v0.25.1).
+    cmd_argv=(cmd --skip-onboarding --trust)
+    [[ "$full_auto" == "1" ]] && cmd_argv+=(--yolo)
+    [[ -n "$max_turns" ]] && cmd_argv+=(--max-turns "$max_turns")
+    [[ -n "$model" ]] && \
+      echo "warning: cmd has no --model flag; '$model' ignored. Use 'cmd model' interactively to set it." >&2
+    [[ -n "$persona" ]] && \
+      echo "warning: cmd has no --agent flag; '$persona' ignored. Personas only via /agents interactively." >&2
+    cmd_argv+=(-p)
+    ;;
+  claude)
+    # Same pattern as cmd — keep -p adjacent to the prompt.
+    cmd_argv=(claude)
+    [[ -n "$model" ]] && cmd_argv+=(--model "$model")
+    [[ "$full_auto" == "1" ]] && cmd_argv+=(--dangerously-skip-permissions)
+    cmd_argv+=(-p)
+    ;;
+  hermes)
+    cmd_argv=(hermes chat -Q --accept-hooks)
+    [[ -n "$resume_id" ]] && cmd_argv+=(--resume "$resume_id")
+    [[ -n "$persona" ]] && cmd_argv+=(--skills "$persona")
+    [[ -n "$model"   ]] && cmd_argv+=(--model "$model")
+    [[ "$full_auto" == "1" ]] && cmd_argv+=(--yolo)
+    [[ -n "$max_turns" ]] && cmd_argv+=(--max-turns "$max_turns")
+    cmd_argv+=(-q)
+    ;;
+  *)
+    echo "unknown --agent: $agent (expected: opencode|cmd|claude|hermes)" >&2; exit 2 ;;
+esac
+
+# Shell-quote each argv element so spaces, quotes, etc. survive.
+quoted_argv=""
+for a in "${cmd_argv[@]}"; do
+  quoted_argv+=" $(printf '%q' "$a")"
+done
+
+quoted_prompt_path="$(printf '%q' "$PROMPT_PATH")"
+quoted_log_path="$(printf '%q' "$LOG_PATH")"
+
+# The full shell command run inside the new tmux window. The prompt is
+# substituted by the shell at runtime via $(cat <file>), so the literal
+# command stays small even for 100KB prompts.
+INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}"
+
+WINDOW_NAME="task-${TASK_ID}"
+tmux new-window -t "${SESSION}" -n "${WINDOW_NAME}" -c "${cwd}" "${INNER_CMD}"
+tmux set-window-option -t "${SESSION}:${WINDOW_NAME}" remain-on-exit on 2>/dev/null || true
+
+cat > "$META_PATH" <<EOF
+task_id=${TASK_ID}
+agent=${agent}
+persona=${persona}
+model=${model}
+cwd=${cwd}
+window=${SESSION}:${WINDOW_NAME}
+log=${LOG_PATH}
+prompt=${PROMPT_PATH}
+spawned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+parent_task=${parent_task}
+resume_id=${resume_id}
+EOF
+
+cat <<EOF
+TASK_ID=${TASK_ID}
+TMUX_WINDOW=${SESSION}:${WINDOW_NAME}
+LOG=${LOG_PATH}
+META=${META_PATH}
+EOF

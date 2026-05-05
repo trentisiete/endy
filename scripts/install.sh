@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# endy install — wires this project into the live agent dirs (idempotent).
+#
+# Steps (each is announced before running; one confirmation up front):
+#   1. ~/.codex/agents/                  ← symlink each codex/agents/*.toml
+#   2. ~/.codex/skills/<skill>/          ← symlink each codex/skills/* dir
+#   3. ~/.config/opencode/agents/        ← symlink each opencode/agents/*.md
+#   4. ~/.commandcode/agents/            ← symlink each commandcode/agents/*.md
+#   5. ~/.codex/config.toml              ← append/refresh endy block (currently
+#                                          MCP servers commented out — hybrid
+#                                          bash mode is active)
+#
+# Real files at target paths are moved aside as .bak.<ts>, not deleted.
+# Re-running this script is safe and idempotent.
+
+set -euo pipefail
+
+ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TS="$(date +%s)"
+
+CODEX_DIR="${HOME}/.codex"
+CODEX_SKILLS_DIR="${CODEX_DIR}/skills"
+OPENCODE_DIR="${HOME}/.config/opencode"
+CMDCODE_DIR="${HOME}/.commandcode"
+LOCAL_BIN="${HOME}/.local/bin"
+
+CODEX_CONFIG="${CODEX_DIR}/config.toml"
+MARKER_BEGIN="# >>> endy v0.1 (managed by ${ENDY_ROOT}/scripts/install.sh)"
+MARKER_END="# <<< endy v0.1"
+
+say()  { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
+ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
+
+confirm() {
+  printf '\033[1m%s\033[0m [y/N] ' "$1"
+  read -r reply
+  case "$reply" in
+    y|Y|yes|Yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# 0. Sanity
+# ----------------------------------------------------------------------------
+[[ -d "$CODEX_DIR"    ]] || { warn "no ~/.codex — install Codex first"; exit 1; }
+[[ -d "$OPENCODE_DIR" ]] || warn "no ~/.config/opencode — will create on link"
+
+cat <<EOF
+
+endy install
+============
+ENDY_ROOT = ${ENDY_ROOT}
+
+Will symlink:
+  ${ENDY_ROOT}/codex/agents/*.toml         →  ${CODEX_DIR}/agents/
+  ${ENDY_ROOT}/codex/skills/*              →  ${CODEX_SKILLS_DIR}/
+  ${ENDY_ROOT}/opencode/agents/*.md        →  ${OPENCODE_DIR}/agents/
+  ${ENDY_ROOT}/commandcode/agents/*.md     →  ${CMDCODE_DIR}/agents/
+  ${ENDY_ROOT}/AGENTS.md                   →  ${CODEX_DIR}/AGENTS.md
+  ${ENDY_ROOT}/AGENTS.md                   →  ${CMDCODE_DIR}/AGENTS.md
+  ${ENDY_ROOT}/bin/endy                    →  ${LOCAL_BIN}/endy   (if confirmed)
+
+Will modify (with backup):
+  ${CODEX_CONFIG}   (append/replace endy v0.1 block)
+
+EOF
+
+confirm "Proceed?" || { say "aborted"; exit 0; }
+
+# ----------------------------------------------------------------------------
+# 1. Symlink agent personas
+# ----------------------------------------------------------------------------
+link_dir() {
+  local src="$1" dst="$2" ext="$3"   # ext: "toml" or "md"
+  mkdir -p "$dst"
+  shopt -s nullglob
+  for f in "$src"/*."$ext"; do
+    [[ -e "$f" ]] || continue
+    local base="$(basename "$f")"
+    # Skip our own documentation files — they're for the repo, not the agent runtime.
+    [[ "$base" == "README.md" ]] && continue
+    local target="${dst}/${base}"
+    if [[ -L "$target" ]]; then
+      ln -sfn "$f" "$target"
+      ok "relinked $target"
+    elif [[ -e "$target" ]]; then
+      mv "$target" "${target}.bak.${TS}"
+      ln -s "$f" "$target"
+      ok "linked $target (existing file → ${target}.bak.${TS})"
+    else
+      ln -s "$f" "$target"
+      ok "linked $target"
+    fi
+  done
+  shopt -u nullglob
+}
+
+say "1/5 Codex agents …"
+link_dir "${ENDY_ROOT}/codex/agents" "${CODEX_DIR}/agents" toml
+
+say "2/5 Codex skills …"
+mkdir -p "${CODEX_SKILLS_DIR}"
+shopt -s nullglob
+for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
+  [[ -d "$skill_src" ]] || continue
+  skill_name="$(basename "$skill_src")"
+  target="${CODEX_SKILLS_DIR}/${skill_name}"
+  if [[ -L "$target" ]]; then
+    ln -sfn "${skill_src%/}" "$target"
+    ok "relinked $target"
+  elif [[ -e "$target" ]]; then
+    mv "$target" "${target}.bak.${TS}"
+    ln -s "${skill_src%/}" "$target"
+    ok "linked $target (existing → ${target}.bak.${TS})"
+  else
+    ln -s "${skill_src%/}" "$target"
+    ok "linked $target"
+  fi
+done
+shopt -u nullglob
+
+say "3/5 OpenCode agents …"
+link_dir "${ENDY_ROOT}/opencode/agents" "${OPENCODE_DIR}/agents" md
+
+say "4/7 CommandCode agents …"
+link_dir "${ENDY_ROOT}/commandcode/agents" "${CMDCODE_DIR}/agents" md
+
+# ----------------------------------------------------------------------------
+# 5. Symlink AGENTS.md so every agent loads endy context globally.
+# ----------------------------------------------------------------------------
+say "5/7 Global AGENTS.md (so codex/cmd auto-load endy context) …"
+link_one_file() {
+  local src="$1" target="$2"
+  if [[ -L "$target" ]]; then
+    ln -sfn "$src" "$target"
+    ok "relinked $target"
+  elif [[ -e "$target" ]]; then
+    mv "$target" "${target}.bak.${TS}"
+    ln -s "$src" "$target"
+    ok "linked $target (existing → ${target}.bak.${TS})"
+  else
+    ln -s "$src" "$target"
+    ok "linked $target"
+  fi
+}
+link_one_file "${ENDY_ROOT}/AGENTS.md" "${CODEX_DIR}/AGENTS.md"
+mkdir -p "${CMDCODE_DIR}"
+link_one_file "${ENDY_ROOT}/AGENTS.md" "${CMDCODE_DIR}/AGENTS.md"
+
+# ----------------------------------------------------------------------------
+# 6. Optionally put `endy` on PATH via ~/.local/bin.
+# ----------------------------------------------------------------------------
+say "6/7 endy CLI entry-point …"
+mkdir -p "${LOCAL_BIN}"
+link_one_file "${ENDY_ROOT}/bin/endy" "${LOCAL_BIN}/endy"
+case ":$PATH:" in
+  *":${LOCAL_BIN}:"*) ok "${LOCAL_BIN} already on PATH" ;;
+  *) warn "${LOCAL_BIN} is NOT on your PATH — add this to ~/.zshrc or ~/.bashrc:"
+     printf '       export PATH="%s:$PATH"\n' "${LOCAL_BIN}" >&2 ;;
+esac
+
+# ----------------------------------------------------------------------------
+# 7. Append/replace the MCP-server block in ~/.codex/config.toml
+# ----------------------------------------------------------------------------
+say "7/7 Codex MCP server config (currently commented out — bash mode active) …"
+
+# Render the snippet with __ENDY_ROOT__ substituted.
+RENDERED="$(sed "s|__ENDY_ROOT__|${ENDY_ROOT}|g" "${ENDY_ROOT}/codex/config.snippet.toml")"
+
+# Backup once per run.
+if [[ -f "$CODEX_CONFIG" ]]; then
+  cp "$CODEX_CONFIG" "${CODEX_CONFIG}.bak.${TS}"
+  ok "backed up ${CODEX_CONFIG} → ${CODEX_CONFIG}.bak.${TS}"
+fi
+
+# Strip any prior endy block, then append fresh.
+TMP="$(mktemp)"
+if [[ -f "$CODEX_CONFIG" ]]; then
+  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+    $0 == b { skip=1; next }
+    $0 == e { skip=0; next }
+    !skip   { print }
+  ' "$CODEX_CONFIG" > "$TMP"
+else
+  : > "$TMP"
+fi
+
+{
+  cat "$TMP"
+  printf '\n%s\n%s\n%s\n' "$MARKER_BEGIN" "$RENDERED" "$MARKER_END"
+} > "$CODEX_CONFIG"
+rm -f "$TMP"
+ok "Codex MCP block written"
+
+# ----------------------------------------------------------------------------
+# Done
+# ----------------------------------------------------------------------------
+cat <<EOF
+
+$(ok "install complete")
+
+You now have a single CLI:  endy
+  endy doctor                  → check every agent's install/auth state
+  endy start                   → launch the tmux gateway
+  endy watch list              → see all tasks (status / agent / cwd / runtime / last)
+  endy spawn opencode -- "..."  → fire a long detached task
+  endy codex --root            → start codex from endy project root with full context
+  endy help                    → all subcommands
+
+If \`endy\` isn't found, ${LOCAL_BIN} isn't on PATH yet — see warning above.
+
+To flip the MCP path on later (still hybrid bash by default):
+  cd ${ENDY_ROOT}/mcp-shims && npm install
+  \$EDITOR ${ENDY_ROOT}/codex/config.snippet.toml   # uncomment the 3 blocks
+  endy install                                       # re-run, idempotent
+EOF
