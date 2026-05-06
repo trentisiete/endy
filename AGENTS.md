@@ -66,3 +66,42 @@ The subagent sees nothing of the orchestrator's session. So when you delegate, t
 - A failure policy ("if you can't complete cleanly, leave the working tree dirty and exit with a one-line summary of where you got stuck").
 
 Spend 30 extra seconds on the prompt; you'll save five minutes of failed-and-restart later.
+
+## Working methodology — the four-step loop
+
+When the user gives you a non-trivial task in this stack, default to this loop. Each step has a different agent or mode; don't collapse them.
+
+### 1. Investigate (opencode)
+
+For diagnosis, audit, code-reading, comparison, or "why does X happen" questions, dispatch **opencode** with `endy spawn opencode --full-auto -- "<self-contained prompt>"`. Give it a concrete output contract: a markdown file at `.logs/diag-<topic>.md` with sections it must fill (gap confirmation, root cause, patch surface, pitfalls, output budget). Opencode is good at multi-file reading and producing tight, sourced reports.
+
+Don't combine investigation and implementation in one delegation — the report becomes the input contract for step 3.
+
+### 2. Synthesize (in the orchestrator)
+
+Read the diag file. Cross-check claims against the actual files (a diag that says "line 944" can be off by ±20). Decide which recommendations to apply, drop, or modify. Write a consolidated patch list as a single prompt. Resist the temptation to skip this step: agents will faithfully implement bad ideas if you don't filter them.
+
+### 3. Implement (cmd with Kimi K2.6)
+
+For code changes — edits, new functions, refactors — dispatch **cmd** with `endy spawn cmd --full-auto --max-turns 9999 -- "<patch list prompt>"`. The patch list should be unambiguous: file paths, line numbers, exact strings, and a clear hand-off file (`.logs/applied-<topic>.md`) listing what changed and any deviations. `--max-turns 9999` is the user's standing preference — let cmd iterate as needed.
+
+Treat cmd as a typing-heavy executor, not a designer. If cmd starts redesigning, the prompt was too loose.
+
+### 4. Verify empirically
+
+Never declare a task done from `bash -n` alone. Verification means **running the changed code on real inputs and observing the result**:
+- Diff the modified files against a snapshot you took before dispatching cmd.
+- Spot-check each landing zone (grep for the new symbol, read ±5 lines around the patch).
+- Run the actual flow end-to-end on a real fixture (a real task ID, a real cwd, etc.).
+- For TUI changes, drive the TUI: `tmux send-keys` to issue the action, `tmux capture-pane -p` to read what the user would see. Don't trust the agent's hand-off file as proof — only the live screen counts.
+- For CLI changes, exercise the new flag against a real call.
+
+If the live test shows wrong behaviour, fix it directly (or send a tight follow-up to cmd). The loop ends when the on-screen result matches the intent — not when the diff looks right.
+
+### When to deviate
+
+- Skip step 1 when the diagnosis is trivial and you already have all the context (a typo fix, a one-line rename).
+- Skip step 3 (do it yourself) when the change is ≤ ~15 lines AND you have the full mental model already; the round-trip overhead exceeds the typing.
+- Never skip step 4. A passing `bash -n` and a confident hand-off file are not verification.
+
+The skill `endy-delegate` (in `codex/skills/endy-delegate/SKILL.md`) has the operational details: capture-pane semantics, send-keys gotchas (use arrow keys not text-search in TUI pickers), the cmd-headless-doesn't-persist constraint, and tmux RAM hygiene primitives (`endy watch gc`, `endy watch kill-all --done`).
