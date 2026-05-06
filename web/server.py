@@ -13,6 +13,7 @@ Endpoints:
   GET    /api/tasks/<id>/stream  SSE — log lines as they're written (event: line)
   GET    /api/events             SSE — "task" event when status changes (poll-based)
   POST   /api/tasks              form/json {agent, persona?, cwd?, prompt} → spawn
+  POST   /api/tasks/<id>/followup form/json {prompt} → endy watch followup
   DELETE /api/tasks/<id>         kill the task
 
 Bind to your Tailnet IP by default (auto-discovered via `tailscale ip -4`).
@@ -39,11 +40,22 @@ LOG_DIR = ENDY_ROOT / ".logs"
 SCRIPTS = ENDY_ROOT / "scripts"
 WEB_DIR = ENDY_ROOT / "web"
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07")
+ANSI_RE = re.compile(
+    r"\x1b\][^\x07]*(?:\x07|\x1b\\)"
+    r"|\x1bP.*?\x1b\\"
+    r"|\x1b_.*?\x1b\\"
+    r"|\x1b\[[0-9;?<>]*[ -/]*[@-~]"
+    r"|\x1b[()][A-Za-z0-9]"
+    r"|\x1b\\"
+    r"|\x1b[=>]"
+    r"|\x1b",
+    re.DOTALL,
+)
 EXIT_RE = re.compile(r"^ENDY_EXIT=(\d+)$", re.MULTILINE)
 ERR_PATTERNS = re.compile(
     r"(?:^|[^A-Za-z])(?:Error:|ERROR:|Exception:|Traceback)"
-    r"|ProviderModelNotFoundError|Unauthorized|model not found|auto-rejecting"
+    r"|ProviderModelNotFoundError|Unauthorized|forbidden|model not found|auto-rejecting"
+    r"|Reached maximum (?:conversation )?turns|response may be incomplete"
 )
 
 
@@ -63,23 +75,65 @@ def parse_meta(meta_path: Path) -> dict:
     return out
 
 
-def task_status(log_path: Path) -> str:
+def meta_log_path(tid: str, meta_data: dict) -> Path:
+    raw = meta_data.get("log") or ""
+    return Path(raw) if raw else LOG_DIR / f"task-{tid}.log"
+
+
+def meta_prompt_path(tid: str, meta_data: dict) -> Path:
+    raw = meta_data.get("prompt") or ""
+    return Path(raw) if raw else LOG_DIR / f"task-{tid}.prompt.md"
+
+
+def tmux_window_exists(meta_data: dict) -> bool:
+    window = meta_data.get("window") or ""
+    if not window:
+        return False
+    if ":" in window:
+        session, window_name = window.split(":", 1)
+    else:
+        session, window_name = "endy", window
+    try:
+        res = subprocess.run(
+            ["tmux", "list-windows", "-t", session, "-F", "#W"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    if res.returncode != 0:
+        return False
+    return window_name in set(res.stdout.splitlines())
+
+
+def task_status(log_path: Path, meta_data: dict | None = None) -> str:
+    kind = (meta_data or {}).get("kind", "spawn")
+    window_exists = tmux_window_exists(meta_data or {})
     if not log_path.exists():
-        return "PENDING"
+        if meta_data and not window_exists:
+            return "ABANDONED"
+        return "CHAT" if kind == "chat" else "PENDING"
     try:
         text = log_path.read_text(errors="replace")
     except OSError:
-        return "PENDING"
+        if meta_data and not window_exists:
+            return "ABANDONED"
+        return "CHAT" if kind == "chat" else "PENDING"
     m = list(EXIT_RE.finditer(text))
     if m:
         ec = int(m[-1].group(1))
         if ec == 0:
             return "DONE-ERR" if ERR_PATTERNS.search(text) else "DONE"
         return f"FAILED({ec})"
-    return "RUNNING"
+    if meta_data and not window_exists:
+        return "ABANDONED"
+    return "CHAT" if kind == "chat" else "RUNNING"
 
 
-def task_last_line(log_path: Path) -> str:
+def task_last_line(log_path: Path, kind: str = "spawn") -> str:
+    if kind == "chat":
+        return "interactive pane captured"
     if not log_path.exists():
         return ""
     try:
@@ -92,8 +146,38 @@ def task_last_line(log_path: Path) -> str:
             continue
         if clean.startswith("ENDY_EXIT=") or clean.startswith("[endy-watch]"):
             continue
+        alnum = sum(1 for ch in clean if ch.isalnum())
+        if alnum == 0 or (len(clean) > 40 and alnum < 5):
+            continue
         return clean[:200]
     return ""
+
+
+def task_model(log_path: Path, meta_data: dict) -> str:
+    model = meta_data.get("model", "")
+    if model or not log_path.exists():
+        return model
+    agent = meta_data.get("agent", "")
+    try:
+        text = strip_ansi(log_path.read_text(errors="replace"))
+    except OSError:
+        return ""
+    if agent == "opencode":
+        for line in text.splitlines():
+            m = re.match(r"^> .* · (.+)$", line.strip())
+            if m:
+                return m.group(1).strip()
+    if agent in {"cmd", "commandcode"}:
+        for line in text.splitlines():
+            if "model: " in line:
+                return line.split("model: ", 1)[1].strip()
+    return ""
+
+
+def orchestrator_label(meta_data: dict) -> str:
+    orch = meta_data.get("orchestrator") or meta_data.get("origin_window") or "manual"
+    orch_agent = meta_data.get("orchestrator_agent", "")
+    return f"{orch}[{orch_agent}]" if orch_agent else orch
 
 
 def runtime_seconds(spawned_iso: str) -> int:
@@ -113,18 +197,26 @@ def list_tasks() -> list:
     for meta in sorted(LOG_DIR.glob("task-*.meta")):
         tid = meta.stem.replace("task-", "")
         meta_data = parse_meta(meta)
-        log_path = LOG_DIR / f"task-{tid}.log"
+        log_path = meta_log_path(tid, meta_data)
         tasks.append(
             {
                 "task_id": tid,
+                "kind": meta_data.get("kind", "spawn"),
+                "orchestrator": meta_data.get("orchestrator", meta_data.get("origin_window", "manual")),
+                "orchestrator_agent": meta_data.get("orchestrator_agent", ""),
+                "orchestrator_label": orchestrator_label(meta_data),
+                "origin_window": meta_data.get("origin_window", ""),
+                "origin_cwd": meta_data.get("origin_cwd", ""),
                 "agent": meta_data.get("agent", ""),
                 "persona": meta_data.get("persona", ""),
-                "model": meta_data.get("model", ""),
+                "model": task_model(log_path, meta_data),
                 "cwd": meta_data.get("cwd", ""),
                 "spawned_at": meta_data.get("spawned_at", ""),
+                "parent_task": meta_data.get("parent_task", ""),
+                "resume_id": meta_data.get("resume_id", ""),
                 "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
-                "status": task_status(log_path),
-                "last": task_last_line(log_path),
+                "status": task_status(log_path, meta_data),
+                "last": task_last_line(log_path, meta_data.get("kind", "spawn")),
             }
         )
     tasks.sort(key=lambda t: t["spawned_at"] or "", reverse=True)
@@ -135,8 +227,9 @@ def task_detail(tid: str) -> dict | None:
     meta_path = LOG_DIR / f"task-{tid}.meta"
     if not meta_path.exists():
         return None
-    log_path = LOG_DIR / f"task-{tid}.log"
-    prompt_path = LOG_DIR / f"task-{tid}.prompt.md"
+    meta_data = parse_meta(meta_path)
+    log_path = meta_log_path(tid, meta_data)
+    prompt_path = meta_prompt_path(tid, meta_data)
     log_text = ""
     if log_path.exists():
         text = log_path.read_text(errors="replace")
@@ -144,19 +237,27 @@ def task_detail(tid: str) -> dict | None:
         lines = text.splitlines()
         log_text = strip_ansi("\n".join(lines[-200:]))
     prompt_text = prompt_path.read_text(errors="replace") if prompt_path.exists() else ""
-    meta_data = parse_meta(meta_path)
     return {
         "task_id": tid,
+        "kind": meta_data.get("kind", "spawn"),
+        "orchestrator": meta_data.get("orchestrator", meta_data.get("origin_window", "manual")),
+        "orchestrator_agent": meta_data.get("orchestrator_agent", ""),
+        "orchestrator_label": orchestrator_label(meta_data),
+        "origin_window": meta_data.get("origin_window", ""),
+        "origin_cwd": meta_data.get("origin_cwd", ""),
         "agent": meta_data.get("agent", ""),
         "persona": meta_data.get("persona", ""),
-        "model": meta_data.get("model", ""),
+        "model": task_model(log_path, meta_data),
         "cwd": meta_data.get("cwd", ""),
         "spawned_at": meta_data.get("spawned_at", ""),
+        "parent_task": meta_data.get("parent_task", ""),
+        "resume_id": meta_data.get("resume_id", ""),
+        "window": meta_data.get("window", ""),
         "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
-        "status": task_status(log_path),
+        "status": task_status(log_path, meta_data),
         "log_tail": log_text,
         "prompt": prompt_text,
-        "last": task_last_line(log_path),
+        "last": task_last_line(log_path, meta_data.get("kind", "spawn")),
     }
 
 
@@ -169,6 +270,7 @@ def spawn_task(agent: str, prompt: str, persona: str = "", cwd: str = "",
         args += ["--cwd", cwd]
     if model:
         args += ["--model", model]
+    args += ["--orchestrator", "web", "--orchestrator-agent", "web"]
     if full_auto:
         args += ["--full-auto"]
     res = subprocess.run(args, capture_output=True, text=True)
@@ -189,6 +291,20 @@ def kill_task(tid: str) -> dict:
     return {"stdout": res.stdout, "stderr": res.stderr, "rc": res.returncode}
 
 
+def followup_task(tid: str, prompt: str) -> dict:
+    res = subprocess.run(
+        [str(SCRIPTS / "endy-watch.sh"), "followup", tid, "--", prompt],
+        capture_output=True,
+        text=True,
+    )
+    out = {"stdout": res.stdout, "stderr": res.stderr, "rc": res.returncode}
+    for ln in res.stdout.splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
 # ----------------------------------------------------------------------------
 # HTTP routing
 # ----------------------------------------------------------------------------
@@ -197,7 +313,8 @@ def kill_task(tid: str) -> dict:
 def stream_log(handler, tid: str):
     """SSE: emit each new log line as it arrives, until ENDY_EXIT seen
     or the client disconnects."""
-    log_path = LOG_DIR / f"task-{tid}.log"
+    meta_data = parse_meta(LOG_DIR / f"task-{tid}.meta")
+    log_path = meta_log_path(tid, meta_data)
 
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
@@ -242,7 +359,7 @@ def stream_log(handler, tid: str):
                         if EXIT_RE.match(clean):
                             saw_exit = True
                 if saw_exit:
-                    write(json.dumps({"status": task_status(log_path)}), event="end")
+                    write(json.dumps({"status": task_status(log_path, meta_data)}), event="end")
                     return
                 # Heartbeat every 15s so proxies don't drop the connection.
                 if time.time() - last_heartbeat > 15:
@@ -280,7 +397,7 @@ def stream_events(handler):
         while True:
             tasks = list_tasks()
             # Only re-send when something changed.
-            sig = tuple((t["task_id"], t["status"], t["last"]) for t in tasks)
+            sig = tuple((t["task_id"], t["status"], t["last"], t.get("parent_task", ""), t.get("orchestrator", "")) for t in tasks)
             if sig != last_signature:
                 if not write(json.dumps(tasks), event="tasks"):
                     return
@@ -375,6 +492,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 model=(body.get("model") or "").strip(),
                 full_auto=str(body.get("full_auto", "true")).lower() != "false",
             )
+            code = 200 if result.get("rc", 1) == 0 else 500
+            return send_json(self, code, result)
+
+        # Followup
+        m = re.match(r"^/api/tasks/([\w-]+)/followup$", path)
+        if m and method == "POST":
+            body = parse_body(self)
+            prompt = (body.get("prompt") or "").strip()
+            if not prompt:
+                return send_json(self, 400, {"error": "prompt required"})
+            result = followup_task(m.group(1), prompt)
             code = 200 if result.get("rc", 1) == 0 else 500
             return send_json(self, code, result)
 

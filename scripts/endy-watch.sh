@@ -11,9 +11,12 @@
 #                                 If <id> given, opens with that task window
 #                                 active. --strict re-enables read-only mode
 #                                 (blocks navigation too — rarely what you want).
-#   endy-watch list               Enriched table: id / status / agent / persona /
-#                                 cwd / runtime / last log line. Designed to scan
+#   endy-watch list               Enriched table: id / status / parent /
+#                                 orchestrator / agent / persona / cwd / runtime / last.
+#                                 Designed to scan
 #                                 even with 15+ active tasks.
+#   endy-watch tree [--all]       Group tasks by orchestrator and working directory.
+#   endy-watch dir <path>         Group tasks under one working directory.
 #   endy-watch log <id>           Open that task's log in `less +F` (follow mode).
 #                                 q quits, /pattern searches, F re-enters follow.
 #                                 <id> matches by prefix; one match required.
@@ -25,9 +28,14 @@
 #                                 Multiple calls → multiple windows so you can
 #                                 watch agent A and agent B side-by-side without
 #                                 either being interrupted. Switch with Ctrl-b N.
-#   endy-watch browse             Interactive picker. Uses fzf if installed
+#   endy-watch chat <id>          Open an interactive chat window for that task's
+#                                 agent/cwd. opencode/hermes resume natively when
+#                                 a session id can be found; cmd opens fresh.
+#   endy-watch browse [--all] [--cwd <dir>] [--orch <name>]
+#                                 Interactive picker. Uses fzf if installed
 #                                 (live preview in side pane); falls back to
-#                                 the table otherwise. Enter on a row → follow.
+#                                 the table otherwise. Enter jumps to chat;
+#                                 ^O opens chat in the background.
 #   endy-watch panel [--all]      Tile view of running task logs. Warns if >4
 #                                 (suggest 'browse' or 'follow' instead).
 #   endy-watch followup <id> [-- <new-prompt>]
@@ -39,6 +47,8 @@
 #   endy-watch kill <id>          Kill a stuck task (closes its tmux window AND
 #                                 writes ENDY_EXIT=130 to the log so it's not
 #                                 reported as RUNNING forever).
+#   endy-watch kill-all --agent <name> | --cwd <dir> | --orch <name> | --everything
+#                                 Close every matching task/chat/follow window.
 #   endy-watch help               This text.
 
 set -u
@@ -46,6 +56,21 @@ set -u
 SESSION="endy"
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ENDY_ROOT}/.logs"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  C_RST=$'\033[0m'
+  C_DIM=$'\033[2m'
+  C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'
+  C_GRN=$'\033[32m'
+  C_YLW=$'\033[33m'
+  C_BLU=$'\033[34m'
+  C_MAG=$'\033[35m'
+  C_CYN=$'\033[36m'
+  C_GRY=$'\033[90m'
+else
+  C_RST=""; C_DIM=""; C_BOLD=""; C_RED=""; C_GRN=""; C_YLW=""; C_BLU=""; C_MAG=""; C_CYN=""; C_GRY=""
+fi
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -60,7 +85,7 @@ require_session() {
 
 # Strip ANSI escapes so the table stays aligned.
 strip_ansi() {
-  sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g'
+  perl -pe 's/\e\][^\a]*(?:\a|\e\\)//g; s/\eP.*?\e\\//g; s/\e_.*?\e\\//g; s/\e\[[0-9;?<>]*[ -\/]*[@-~]//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\e\\//g; s/\e//g'
 }
 
 # Resolve a task id prefix to a full task id (errors if 0 or >1 matches).
@@ -99,23 +124,181 @@ meta_field() {
   grep "^${field}=" "$meta" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
+task_meta_path() {
+  local id="$1"
+  printf '%s/task-%s.meta\n' "$LOG_DIR" "$id"
+}
+
+task_prompt_path() {
+  local meta="$1" id="$2"
+  local path; path="$(meta_field "$meta" prompt)"
+  [[ -n "$path" ]] || path="${LOG_DIR}/task-${id}.prompt.md"
+  printf '%s\n' "$path"
+}
+
+task_log_path() {
+  local meta="$1" id="$2"
+  local path; path="$(meta_field "$meta" log)"
+  [[ -n "$path" ]] || path="${LOG_DIR}/task-${id}.log"
+  printf '%s\n' "$path"
+}
+
+task_window_name() {
+  local meta="$1" id="$2"
+  local window; window="$(meta_field "$meta" window)"
+  if [[ -n "$window" ]]; then
+    printf '%s\n' "${window##*:}"
+    return
+  fi
+  printf 'task-%s\n' "$id"
+}
+
+print_task_commands() {
+  local id="$1" window_name="$2"
+  cat <<EOF
+tmux commands:
+  tmux attach -t ${SESSION}
+  tmux select-window -t ${SESSION}:${window_name}
+  tmux list-windows -t ${SESSION}
+  tmux kill-window -t ${SESSION}:${window_name}
+
+endy commands:
+  endy watch view ${id}
+  endy watch follow ${id}
+  endy watch chat ${id}
+  endy watch followup ${id} -- "<next prompt>"
+  endy watch kill ${id}
+EOF
+}
+
+short_task_ref() {
+  local id="$1"
+  local short="${id#*-}"
+  [[ ${#short} -gt 13 ]] && short="…${short: -12}"
+  printf '%s\n' "$short"
+}
+
+task_orchestrator() {
+  local meta="$1"
+  local orch; orch="$(meta_field "$meta" orchestrator)"
+  local origin_window; origin_window="$(meta_field "$meta" origin_window)"
+  orch="${orch:-${origin_window:-manual}}"
+  printf '%s\n' "$orch"
+}
+
+task_orchestrator_label() {
+  local meta="$1"
+  local orch; orch="$(task_orchestrator "$meta")"
+  local orch_agent; orch_agent="$(meta_field "$meta" orchestrator_agent)"
+  if [[ -n "$orch_agent" ]]; then
+    printf '%s[%s]\n' "$orch" "$orch_agent"
+  else
+    printf '%s\n' "$orch"
+  fi
+}
+
+model_label() {
+  local meta="$1" log="$2" agent="$3"
+  local model; model="$(meta_field "$meta" model)"
+  if [[ -z "$model" && -f "$log" ]]; then
+    case "$agent" in
+      opencode)
+        model="$(strip_ansi < "$log" 2>/dev/null \
+          | awk -F ' · ' '/^> / { print $2; exit }' \
+          | tr -d '\r')"
+        ;;
+      cmd|commandcode)
+        model="$(strip_ansi < "$log" 2>/dev/null \
+          | awk -F 'model: ' '/model: / { print $2; exit }' \
+          | tr -d '\r')"
+        ;;
+    esac
+  fi
+  [[ -n "$model" ]] || model="—"
+  printf '%s\n' "$model"
+}
+
+cwd_matches_filter() {
+  local cwd="$1" filter="$2"
+  [[ -z "$filter" ]] && return 0
+  [[ "$cwd" == "$filter" || "$cwd" == "$filter"/* ]]
+}
+
+status_color() {
+  case "$1" in
+    RUN|PENDING|CHAT) printf '%s' "$C_BLU" ;;
+    DONE) printf '%s' "$C_GRN" ;;
+    DONE-ERR) printf '%s' "$C_YLW" ;;
+    FAIL*|FAILED*) printf '%s' "$C_RED" ;;
+    ABANDONED) printf '%s' "$C_GRY" ;;
+    *) printf '%s' "$C_RST" ;;
+  esac
+}
+
+tail_pane_command() {
+  local id="$1" log="$2" label="$3"
+  local quoted_log; quoted_log="$(printf '%q' "$log")"
+  local script="
+clear
+printf '\033[1;36m%s\033[0m\n' '${label}'
+printf '\033[1;33mtmux: attach=%s | picker=Ctrl-b w | detach=Ctrl-b d | kill-pane=Ctrl-b x\033[0m\n' '${SESSION}'
+printf '\033[1;33mendy: view=%s | chat=%s | followup=%s | kill=%s\033[0m\n\n' 'endy watch view ${id}' 'endy watch chat ${id}' 'endy watch followup ${id} -- \"<next prompt>\"' 'endy watch kill ${id}'
+exec tail -F ${quoted_log}
+"
+  printf 'bash -c %s' "$(printf '%q' "$script")"
+}
+
+focus_window() {
+  local window="$1"
+  tmux select-window -t "$window" 2>/dev/null || true
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "$window"
+  fi
+  exec tmux attach -t "$window"
+}
+
+resume_id_for_task() {
+  local agent="$1" cwd="$2" log="$3"
+  local sid=""
+  case "$agent" in
+    hermes)
+      sid="$(grep -oE '^session_id: +[0-9]{8}_[0-9]{6}_[a-f0-9]{6}$' "$log" 2>/dev/null \
+            | tail -1 | awk '{print $2}')"
+      ;;
+    opencode)
+      local opencode_db="${HOME}/.local/share/opencode/opencode.db"
+      if [[ -f "$opencode_db" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        sid="$(sqlite3 "$opencode_db" \
+          "SELECT id FROM session WHERE directory = '$(printf %s "$cwd" | sed "s/'/''/g")' \
+           ORDER BY time_created DESC LIMIT 1;" 2>/dev/null)"
+      fi
+      ;;
+  esac
+  printf '%s\n' "$sid"
+}
+
 # Single source of truth for the task-status heuristic. When adding new
 # patterns, also update check-long-task.sh's log_looks_failed() and the
 # matching block in web/server.py.
 log_status() {
   local log="$1"
   local task_id="${2:-}"
+  local kind="${3:-spawn}"
 
-  exists_in_tmux=0
+  local exists_in_tmux=0
+  local expected_window="task-${task_id}"
+  [[ "$kind" == "chat" ]] && expected_window="chat-${task_id}"
   if [[ -n "$task_id" ]] \
      && tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null \
-        | grep -qx "task-${task_id}"; then
+        | grep -qx "$expected_window"; then
     exists_in_tmux=1
   fi
 
   if [[ ! -f "$log" ]]; then
     if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
       echo "ABANDONED"
+    elif [[ "$kind" == "chat" ]]; then
+      echo "CHAT"
     else
       echo "PENDING"
     fi
@@ -140,6 +323,8 @@ log_status() {
   # No ENDY_EXIT yet. If the tmux window is also gone, the task died silently.
   if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
     echo "ABANDONED"
+  elif [[ "$kind" == "chat" ]]; then
+    echo "CHAT"
   else
     echo "RUN"
   fi
@@ -150,25 +335,45 @@ log_status() {
 # ---------------------------------------------------------------------------
 
 cmd_list() {
+  local cwd_filter=""
+  local orch_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd|--dir) cwd_filter="$2"; shift 2 ;;
+      --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
+      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+    esac
+  done
+  [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
   local now; now="$(date +%s)"
   local found=0
 
   # Header
-  printf '%-22s %-9s %-9s %-14s %-30s %-7s %s\n' \
-    "ID" "STATUS" "AGENT" "PERSONA" "CWD" "RUN" "LAST"
-  printf '%-22s %-9s %-9s %-14s %-30s %-7s %s\n' \
-    "──────────────────────" "─────────" "─────────" "──────────────" "──────────────────────────────" "───────" "──────────"
+  printf '%b%-22s %-9s %-13s %-14s %-9s %-16s %-30s %-7s %s%b\n' \
+    "$C_BOLD$C_CYN" "ID" "STATUS" "PARENT" "ORCH" "AGENT" "MODEL" "CWD" "RUN" "LAST" "$C_RST"
+  printf '%b%-22s %-9s %-13s %-14s %-9s %-16s %-30s %-7s %s%b\n' \
+    "$C_DIM" "──────────────────────" "─────────" "─────────────" "──────────────" "─────────" "────────────────" "──────────────────────────────" "───────" "──────────" "$C_RST"
 
   shopt -s nullglob
   for m in "${LOG_DIR}"/task-*.meta; do
-    found=1
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
-    local log="${LOG_DIR}/task-${id}.log"
+    local log; log="$(task_log_path "$m" "$id")"
 
     local agent;       agent="$(meta_field "$m" agent)"
     local persona;     persona="$(meta_field "$m" persona)"; persona="${persona:-—}"
     local cwd;         cwd="$(meta_field "$m" cwd)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
+    local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local parent;      parent="$(meta_field "$m" parent_task)"
+    local orch;        orch="$(task_orchestrator "$m")"
+    local orch_label;  orch_label="$(task_orchestrator_label "$m")"
+    local model;       model="$(model_label "$m" "$log" "$agent")"
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
+    found=1
+    local parent_short="—"
+    [[ -n "$parent" ]] && parent_short="$(short_task_ref "$parent")"
 
     # spawned_iso is ISO-8601 UTC like 2026-05-05T10:18:27Z. macOS date -j -f.
     local spawned_epoch
@@ -180,14 +385,18 @@ cmd_list() {
       runtime="?"
     fi
 
-    local status; status="$(log_status "$log" "$id")"
+    local status; status="$(log_status "$log" "$id" "$kind")"
 
     local last
-    if [[ -f "$log" ]]; then
+    if [[ "$kind" == "chat" ]]; then
+      last="(interactive pane captured)"
+    elif [[ -f "$log" ]]; then
       # Show the last meaningful line: skip blank lines and the ENDY_EXIT
       # marker so the column reflects what the agent actually said last.
       last="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\]|[[:space:]]*$)' "$log" 2>/dev/null \
-              | tail -1 | strip_ansi | tr -d '\r' | head -c 80)"
+              | tail -n 200 | strip_ansi | tr -d '\r' \
+              | awk '/[[:alnum:]]/ { line=$0 } END { print line }' \
+              | head -c 80)"
       [[ -z "$last" ]] && last="(empty)"
     else
       last="(no log yet)"
@@ -201,14 +410,115 @@ cmd_list() {
       cwd_short="$cwd"
     fi
 
-    printf '%-22s %-9s %-9s %-14s %-30s %-7s %s\n' \
-      "$id" "$status" "$agent" "$persona" "$cwd_short" "$runtime" "$last"
+    local sc; sc="$(status_color "$status")"
+    printf '%b%-22s%b %b%-9s%b %-13s %b%-14s%b %b%-9s%b %-16s %-30s %-7s %s\n' \
+      "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$parent_short" \
+      "$C_MAG" "$orch_label" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$cwd_short" "$runtime" "$last"
   done
   shopt -u nullglob
 
   if [[ "$found" == "0" ]]; then
     echo "(no tasks in ${LOG_DIR})"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# tree — group tasks by working directory
+# ---------------------------------------------------------------------------
+
+cmd_tree() {
+  local include_all=0
+  local cwd_filter=""
+  local orch_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) include_all=1; shift ;;
+      --cwd|--dir) cwd_filter="$2"; shift 2 ;;
+      --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
+      *) echo "usage: endy watch tree [--all] [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+    esac
+  done
+  [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
+  local now; now="$(date +%s)"
+  local rows=()
+  shopt -s nullglob
+  for m in "${LOG_DIR}"/task-*.meta; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local status; status="$(log_status "$log" "$id" "$kind")"
+    case "$status" in
+      DONE|DONE-ERR|FAIL\(*\)|ABANDONED)
+        [[ "$include_all" == "1" ]] || continue ;;
+    esac
+
+    local cwd; cwd="$(meta_field "$m" cwd)"
+    local agent; agent="$(meta_field "$m" agent)"
+    local orch; orch="$(task_orchestrator "$m")"
+    local orch_label; orch_label="$(task_orchestrator_label "$m")"
+    local model; model="$(model_label "$m" "$log" "$agent")"
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
+    local parent; parent="$(meta_field "$m" parent_task)"; parent="${parent:-—}"
+    local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
+    local spawned_epoch; spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
+    local runtime="?"
+    [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
+    local last="(no log yet)"
+    if [[ "$kind" == "chat" ]]; then
+      last="(interactive pane captured)"
+    elif [[ -f "$log" ]]; then
+      last="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\]|[[:space:]]*$)' "$log" 2>/dev/null \
+              | tail -n 200 | strip_ansi | tr -d '\r' | tr '\t' ' ' \
+              | awk '/[[:alnum:]]/ { line=$0 } END { print line }' \
+              | head -c 90)"
+      [[ -z "$last" ]] && last="(empty)"
+    fi
+    rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}")
+  done
+  shopt -u nullglob
+
+  if [[ "${#rows[@]}" -eq 0 ]]; then
+    if [[ "$include_all" == "1" ]]; then
+      echo "(no tasks in ${LOG_DIR})"
+    else
+      echo "(no active tasks; use 'endy watch tree --all' to include finished tasks)"
+    fi
+    return
+  fi
+
+  local last_orch=""
+  local last_cwd=""
+  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 | while IFS=$'\t' read -r orch orch_label cwd id status agent model kind parent runtime last; do
+    if [[ "$orch" != "$last_orch" ]]; then
+      [[ -n "$last_orch" ]] && printf '\n'
+      printf '%bORCH%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_MAG$C_BOLD" "$orch_label" "$C_RST"
+      last_orch="$orch"
+      last_cwd=""
+    fi
+    if [[ "$cwd" != "$last_cwd" ]]; then
+      [[ -n "$last_cwd" ]] && printf '\n'
+      printf '  %bDIR%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_CYN" "$cwd" "$C_RST"
+      printf '    %btmux attach -t %s%b    # Ctrl-b w opens the window picker\n' "$C_DIM" "$SESSION" "$C_RST"
+      last_cwd="$cwd"
+    fi
+    local sc; sc="$(status_color "$status")"
+    if [[ "$parent" == "—" ]]; then
+      printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s %s\n' \
+        "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$last"
+    else
+      printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s parent:%s  %s\n' \
+        "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$(short_task_ref "$parent")" "$last"
+    fi
+  done
+}
+
+cmd_dir() {
+  local dir="${1:-}"
+  [[ -n "$dir" ]] || { echo "usage: endy watch dir <path> [--all] [--orch <name>]" >&2; exit 2; }
+  shift
+  cmd_tree --cwd "$dir" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,7 +529,8 @@ cmd_log() {
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || { echo "usage: endy-watch log <id-prefix>" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
-  local log="${LOG_DIR}/task-${id}.log"
+  local meta; meta="$(task_meta_path "$id")"
+  local log; log="$(task_log_path "$meta" "$id")"
   if [[ ! -f "$log" ]]; then
     echo "task $id has no log yet (still starting up)" >&2
     exit 1
@@ -235,9 +546,9 @@ cmd_view() {
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || { echo "usage: endy-watch view <id-prefix>" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
-  local meta="${LOG_DIR}/task-${id}.meta"
-  local prompt="${LOG_DIR}/task-${id}.prompt.md"
-  local log="${LOG_DIR}/task-${id}.log"
+  local meta; meta="$(task_meta_path "$id")"
+  local prompt; prompt="$(task_prompt_path "$meta" "$id")"
+  local log; log="$(task_log_path "$meta" "$id")"
 
   {
     echo "════════════════════════════════════════════════════════════════"
@@ -267,8 +578,9 @@ cmd_follow() {
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || { echo "usage: endy-watch follow <id-prefix>" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
-  local prompt="${LOG_DIR}/task-${id}.prompt.md"
-  local log="${LOG_DIR}/task-${id}.log"
+  local meta; meta="$(task_meta_path "$id")"
+  local prompt; prompt="$(task_prompt_path "$meta" "$id")"
+  local log; log="$(task_log_path "$meta" "$id")"
 
   if [[ ! -f "$log" ]]; then
     echo "task $id has no log yet (still starting up)" >&2
@@ -281,6 +593,7 @@ cmd_follow() {
   if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
     tmux select-window -t "${SESSION}:${window_name}"
     echo "follow window already open: ${SESSION}:${window_name}"
+    print_task_commands "$id" "$window_name"
     return 0
   fi
 
@@ -291,6 +604,8 @@ cmd_follow() {
   local inner="bash -c $(printf '%q' "
 clear
 printf '\033[1;36m──── prompt for task %s ────\033[0m\n' '${id}'
+printf '\033[1;33mtmux: attach=%s | select=%s | picker=Ctrl-b w | detach=Ctrl-b d\033[0m\n' '${SESSION}' '${SESSION}:${window_name}'
+printf '\033[1;33mendy: view=%s | chat=%s | followup=%s | kill=%s\033[0m\n\n' 'endy watch view ${id}' 'endy watch chat ${id}' 'endy watch followup ${id} -- \"<next prompt>\"' 'endy watch kill ${id}'
 [[ -f ${quoted_prompt} ]] && cat ${quoted_prompt} || echo '(no prompt file)'
 echo
 printf '\033[1;36m──── log (live) ────\033[0m\n'
@@ -301,7 +616,7 @@ exec tail -F ${quoted_log}
   tmux set-window-option -t "${SESSION}:${window_name}" remain-on-exit on 2>/dev/null || true
 
   echo "follow window opened: ${SESSION}:${window_name}"
-  echo "attach with: endy watch attach   (Ctrl-b N to switch windows)"
+  print_task_commands "$id" "$window_name"
 }
 
 # ---------------------------------------------------------------------------
@@ -309,10 +624,26 @@ exec tail -F ${quoted_log}
 # ---------------------------------------------------------------------------
 
 cmd_browse() {
+  local include_all=0
+  local cwd_filter=""
+  local orch_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) include_all=1; shift ;;
+      --cwd|--dir) cwd_filter="$2"; shift 2 ;;
+      --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
+      *) echo "usage: endy watch browse [--all] [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+    esac
+  done
+  [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
   if ! command -v fzf >/dev/null 2>&1; then
     echo "fzf not installed — falling back to 'list'." >&2
     echo "  (install with: brew install fzf — gives you a live preview picker)" >&2
-    cmd_list
+    local list_args=()
+    [[ -n "$cwd_filter" ]] && list_args+=(--cwd "$cwd_filter")
+    [[ -n "$orch_filter" ]] && list_args+=(--orch "$orch_filter")
+    cmd_list "${list_args[@]}"
     return
   fi
 
@@ -333,20 +664,31 @@ cmd_browse() {
   local now; now="$(date +%s)"
   for m in "${LOG_DIR}"/task-*.meta; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
-    local log="${LOG_DIR}/task-${id}.log"
+    local log; log="$(task_log_path "$m" "$id")"
     local agent;       agent="$(meta_field "$m" agent)"
     local persona;     persona="$(meta_field "$m" persona)"; persona="${persona:-ad-hoc}"
     local cwd;         cwd="$(meta_field "$m" cwd)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
+    local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local parent;      parent="$(meta_field "$m" parent_task)"
+    local orch;        orch="$(task_orchestrator "$m")"
+    local orch_label;  orch_label="$(task_orchestrator_label "$m")"
+    local model;       model="$(model_label "$m" "$log" "$agent")"
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local spawned_epoch
     spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
     local rt="?"
     [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
-    local st; st="$(log_status "$log" "$id")"
+    local st; st="$(log_status "$log" "$id" "$kind")"
+    case "$st" in
+      DONE|DONE-ERR|FAIL\(*\)|FAILED\(*\)|ABANDONED)
+        [[ "$include_all" == "1" ]] || continue ;;
+    esac
 
     local dot_color
     case "$st" in
-      RUN|PENDING) dot_color="$C_BLU" ;;
+      RUN|PENDING|CHAT) dot_color="$C_BLU" ;;
       DONE)        dot_color="$C_GRN" ;;
       DONE-ERR)    dot_color="$C_YLW" ;;
       FAILED*)     dot_color="$C_RED" ;;
@@ -361,19 +703,28 @@ cmd_browse() {
       cwd_short="$cwd"
     fi
 
-    rows+=("$(printf '%s%s  %s●%s %s%-9s%s  %s%-9s%s  %-14s  %s%-7s%s  %s%s%s' \
+    local relation=""
+    [[ -n "$parent" ]] && relation=" parent:$(short_task_ref "$parent")"
+
+    rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s%s%s' \
       "$C_BOLD" "$id" "$C_RST" \
-      "$dot_color" "$C_RST" \
       "$dot_color" "$st" "$C_RST" \
+      "$C_GRN" "$orch_label" "$C_RST" \
       "$C_BLU" "$agent" "$C_RST" \
+      "$model" \
       "$persona" \
       "$C_DIM" "$rt" "$C_RST" \
-      "$C_DIM" "$cwd_short" "$C_RST")")
+      "$C_DIM" "$cwd_short" "$C_RST" \
+      "$relation")")
   done
   shopt -u nullglob
 
   if [[ ${#rows[@]} -eq 0 ]]; then
-    echo "(no tasks — spawn one with: endy spawn <agent> -- \"<prompt>\")"
+    if [[ "$include_all" == "1" ]]; then
+      echo "(no matching tasks — spawn one with: endy spawn <agent> -- \"<prompt>\")"
+    else
+      echo "(no active matching tasks — use: endy watch browse --all)"
+    fi
     return
   fi
 
@@ -382,15 +733,17 @@ cmd_browse() {
   local binds=(
     "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {1})"
     "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {1})"
+    "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {1})+abort"
+    "--bind=ctrl-o:execute-silent(${BASH_SOURCE[0]} chat {1} --no-attach)+refresh-preview"
     "--bind=ctrl-k:execute(${BASH_SOURCE[0]} kill {1})"
     "--bind=ctrl-r:refresh-preview"
   )
   local header
   if [[ -n "$copy_cmd" ]]; then
     binds+=("--bind=ctrl-y:execute-silent(printf %s {1} | ${copy_cmd})+abort")
-    header="enter→follow  ^V view  ^L log  ^Y copy id  ^K kill  ^R refresh  esc cancel"
+    header="enter→chat  ^O open chat  ^F follow  ^V view  ^L log  ^Y copy id  ^K kill  ^R refresh  esc cancel"
   else
-    header="enter→follow  ^V view  ^L log  ^K kill  ^R refresh  esc cancel  (install pbcopy/xclip for ^Y copy)"
+    header="enter→chat  ^O open chat  ^F follow  ^V view  ^L log  ^K kill  ^R refresh  esc cancel  (install pbcopy/xclip for ^Y copy)"
   fi
 
   local picked
@@ -399,7 +752,7 @@ cmd_browse() {
           --header="$header" \
           --header-first \
           --preview="${preview_script} {1}" \
-          --preview-window=right:65%:wrap:follow \
+          --preview-window=right:30%:wrap:follow \
           --no-mouse \
           "${binds[@]}")"
   [[ -z "$picked" ]] && return 0
@@ -408,7 +761,7 @@ cmd_browse() {
   local picked_id; picked_id="$(printf '%s' "$picked" | strip_ansi | awk '{print $1}')"
   [[ -z "$picked_id" ]] && return 0
 
-  cmd_follow "$picked_id"
+  cmd_chat "$picked_id"
 }
 
 # ---------------------------------------------------------------------------
@@ -420,18 +773,22 @@ cmd_panel() {
   local include_all=0
   [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]] && include_all=1
 
-  local logs=() log
+  local entries=()
   shopt -s nullglob
-  for log in "${LOG_DIR}"/task-*.log; do
-    if grep -qE '^ENDY_EXIT=' "$log" 2>/dev/null; then
-      [[ "$include_all" == "1" ]] && logs+=("$log")
-    else
-      logs+=("$log")
-    fi
+  for m in "${LOG_DIR}"/task-*.meta; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local status; status="$(log_status "$log" "$id" "$kind")"
+    case "$status" in
+      DONE|DONE-ERR|FAIL\(*\)|ABANDONED)
+        [[ "$include_all" == "1" ]] || continue ;;
+    esac
+    entries+=("${id}|${log}")
   done
   shopt -u nullglob
 
-  if [[ "${#logs[@]}" -eq 0 ]]; then
+  if [[ "${#entries[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
       echo "no tasks at all" >&2
     else
@@ -440,8 +797,8 @@ cmd_panel() {
     exit 0
   fi
 
-  if [[ "${#logs[@]}" -gt 4 ]]; then
-    echo "warning: ${#logs[@]} task logs would tile into unreadable panes." >&2
+  if [[ "${#entries[@]}" -gt 4 ]]; then
+    echo "warning: ${#entries[@]} task logs would tile into unreadable panes." >&2
     echo "use 'endy-watch list' for a scannable table, then 'endy-watch log <id>' for one." >&2
     echo "continue anyway? [y/N] " >&2
     read -r reply
@@ -449,15 +806,16 @@ cmd_panel() {
   fi
 
   tmux kill-window -t "${SESSION}:panel" 2>/dev/null || true
-  local first="${logs[0]}"
-  local first_label; first_label="$(basename "$first" .log)"
+  local first_id="${entries[0]%%|*}"
+  local first_log="${entries[0]#*|}"
   tmux new-window -t "$SESSION" -n panel \
-    "printf '\n──── %s ────\n' '${first_label}'; tail -F '${first}'"
+    "$(tail_pane_command "$first_id" "$first_log" "task-${first_id}")"
   local i
-  for ((i=1; i<${#logs[@]}; i++)); do
-    local label; label="$(basename "${logs[$i]}" .log)"
+  for ((i=1; i<${#entries[@]}; i++)); do
+    local id="${entries[$i]%%|*}"
+    local log="${entries[$i]#*|}"
     tmux split-window -t "${SESSION}:panel" \
-      "printf '\n──── %s ────\n' '${label}'; tail -F '${logs[$i]}'"
+      "$(tail_pane_command "$id" "$log" "task-${id}")"
     tmux select-layout -t "${SESSION}:panel" tiled
   done
   tmux select-window -t "${SESSION}:panel"
@@ -489,10 +847,93 @@ cmd_attach() {
 
   if [[ -n "$prefix" ]]; then
     local id; id="$(resolve_id "$prefix")" || exit 1
-    exec tmux attach "${flags[@]+${flags[@]}}" -t "${SESSION}:task-${id}"
+    local meta; meta="$(task_meta_path "$id")"
+    local window; window="$(meta_field "$meta" window)"
+    [[ -n "$window" ]] || window="${SESSION}:task-${id}"
+    exec tmux attach "${flags[@]+${flags[@]}}" -t "$window"
   else
     exec tmux attach "${flags[@]+${flags[@]}}" -t "$SESSION"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# chat — open an interactive chat for an existing task
+# ---------------------------------------------------------------------------
+
+cmd_chat() {
+  require_session
+  local prefix=""
+  local attach=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-attach) attach=0; shift ;;
+      *)           if [[ -z "$prefix" ]]; then prefix="$1"; fi; shift ;;
+    esac
+  done
+  [[ -n "$prefix" ]] || { echo "usage: endy watch chat <id-prefix> [--no-attach]" >&2; exit 2; }
+
+  local id; id="$(resolve_id "$prefix")" || exit 1
+  local meta; meta="$(task_meta_path "$id")"
+  [[ -f "$meta" ]] || { echo "no meta for $id" >&2; exit 1; }
+
+  local kind window log agent persona model cwd orch orch_agent
+  kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
+  window="$(meta_field "$meta" window)"
+  log="$(task_log_path "$meta" "$id")"
+  agent="$(meta_field "$meta" agent)"
+  persona="$(meta_field "$meta" persona)"
+  model="$(meta_field "$meta" model)"
+  cwd="$(meta_field "$meta" cwd)"
+  orch="$(task_orchestrator "$meta")"
+  orch_agent="$(meta_field "$meta" orchestrator_agent)"
+
+  if [[ "$kind" == "chat" ]]; then
+    [[ -n "$window" ]] || window="${SESSION}:chat-${id}"
+    echo "chat window: $window"
+    echo "tmux commands:"
+    echo "  tmux attach -t ${SESSION}"
+    echo "  tmux select-window -t ${window}"
+    echo "  tmux kill-window -t ${window}"
+    echo
+    echo "endy commands:"
+    echo "  endy watch view ${id}"
+    echo "  endy watch follow ${id}"
+    echo "  endy watch kill ${id}"
+    [[ "$attach" == "1" ]] && focus_window "$window"
+    return 0
+  fi
+
+  local sid; sid="$(resume_id_for_task "$agent" "$cwd" "$log")"
+  if [[ -n "$sid" ]]; then
+    echo "opening interactive $agent chat resumed from task $id: $sid"
+  elif [[ "$agent" == "cmd" || "$agent" == "commandcode" ]]; then
+    echo "opening interactive cmd chat for task $id (cmd has no headless interactive resume)"
+  else
+    echo "opening fresh interactive $agent chat for task $id (no session id found)"
+  fi
+
+  local spawn_args=(--agent "$agent" --cwd "$cwd" --parent-task "$id" --orchestrator "$orch")
+  [[ "$attach" == "0" ]] && spawn_args+=(--no-select)
+  [[ -n "$orch_agent" ]] && spawn_args+=(--orchestrator-agent "$orch_agent")
+  [[ -n "$sid"     ]] && spawn_args+=(--resume "$sid")
+  [[ -n "$persona" ]] && spawn_args+=(--persona "$persona")
+  [[ -n "$model"   ]] && spawn_args+=(--model "$model")
+
+  local out
+  out="$("${ENDY_ROOT}/scripts/spawn-chat.sh" "${spawn_args[@]}")" || {
+    printf '%s\n' "$out"
+    exit 1
+  }
+  printf '%s\n' "$out"
+  echo
+  echo "PARENT_TASK=$id"
+  echo "SESSION_RESUMED=$([[ -n "$sid" ]] && echo true || echo false)"
+
+  local new_window
+  new_window="$(printf '%s\n' "$out" | grep '^TMUX_WINDOW=' | head -1 | cut -d= -f2-)"
+  [[ -n "$new_window" ]] || return 0
+  [[ "$attach" == "1" ]] && focus_window "$new_window"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -527,34 +968,19 @@ cmd_followup() {
 
   local id; id="$(resolve_id "$prefix")" || exit 1
   local meta="${LOG_DIR}/task-${id}.meta"
-  local log="${LOG_DIR}/task-${id}.log"
+  local log; log="$(task_log_path "$meta" "$id")"
   [[ -f "$meta" ]] || { echo "no meta for $id" >&2; exit 1; }
 
-  local agent persona model cwd
+  local agent persona model cwd orch orch_agent
   agent="$(meta_field "$meta" agent)"
   persona="$(meta_field "$meta" persona)"
   model="$(meta_field "$meta" model)"
   cwd="$(meta_field "$meta" cwd)"
+  orch="$(task_orchestrator "$meta")"
+  orch_agent="$(meta_field "$meta" orchestrator_agent)"
 
   # Harvest session_id per agent.
-  local sid=""
-  case "$agent" in
-    hermes)
-      sid="$(grep -oE '^session_id: +[0-9]{8}_[0-9]{6}_[a-f0-9]{6}$' "$log" 2>/dev/null \
-            | tail -1 | awk '{print $2}')"
-      ;;
-    opencode)
-      local opencode_db="${HOME}/.local/share/opencode/opencode.db"
-      if [[ -f "$opencode_db" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        # Latest session for this directory — best heuristic without --format json.
-        sid="$(sqlite3 "$opencode_db" \
-          "SELECT id FROM session WHERE directory = '$(printf %s "$cwd" | sed "s/'/''/g")' \
-           ORDER BY time_created DESC LIMIT 1;" 2>/dev/null)"
-      fi
-      ;;
-    cmd|commandcode|claude)
-      sid="" ;;
-  esac
+  local sid; sid="$(resume_id_for_task "$agent" "$cwd" "$log")"
 
   echo
   if [[ -n "$sid" ]]; then
@@ -575,7 +1001,8 @@ ${prompt}"
   fi
 
   # Build spawn args. Always --full-auto (followups are unsupervised by definition).
-  local spawn_args=(--agent "$agent" --cwd "$cwd" --full-auto --parent-task "$id" --prompt "$prompt")
+  local spawn_args=(--agent "$agent" --cwd "$cwd" --full-auto --parent-task "$id" --orchestrator "$orch" --prompt "$prompt")
+  [[ -n "$orch_agent" ]] && spawn_args+=(--orchestrator-agent "$orch_agent")
   [[ -n "$sid"     ]] && spawn_args+=(--resume "$sid")
   [[ -n "$persona" ]] && spawn_args+=(--persona "$persona")
   [[ -n "$model"   ]] && spawn_args+=(--model "$model")
@@ -595,8 +1022,10 @@ cmd_kill() {
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || { echo "usage: endy-watch kill <id-prefix>" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
-  local log="${LOG_DIR}/task-${id}.log"
-  local window="${SESSION}:task-${id}"
+  local meta; meta="$(task_meta_path "$id")"
+  local log; log="$(task_log_path "$meta" "$id")"
+  local window; window="$(meta_field "$meta" window)"
+  [[ -n "$window" ]] || window="${SESSION}:task-${id}"
 
   echo "killing $window …"
   tmux kill-window -t "$window" 2>/dev/null || echo "  (window already gone)"
@@ -608,25 +1037,121 @@ cmd_kill() {
   fi
 }
 
+cmd_kill_all() {
+  require_session
+  local agent_filter=""
+  local cwd_filter=""
+  local orch_filter=""
+  local everything=0
+  local dry_run=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent) agent_filter="$2"; shift 2 ;;
+      --cwd|--dir) cwd_filter="$2"; shift 2 ;;
+      --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
+      --everything) everything=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      *) echo "usage: endy watch kill-all (--agent <name> | --cwd <dir> | --orch <name> | --everything) [--dry-run]" >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ -z "$agent_filter" && -z "$cwd_filter" && -z "$orch_filter" && "$everything" != "1" ]]; then
+    echo "refusing to close every task without a filter; pass --everything if that is intentional" >&2
+    exit 2
+  fi
+
+  [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
+  local closed=0 matched=0
+  shopt -s nullglob
+  for m in "${LOG_DIR}"/task-*.meta; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local agent; agent="$(meta_field "$m" agent)"
+    local cwd; cwd="$(meta_field "$m" cwd)"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local orch; orch="$(task_orchestrator "$m")"
+
+    [[ "$everything" == "1" || -z "$agent_filter" || "$agent" == "$agent_filter" ]] || continue
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
+    matched=$((matched + 1))
+
+    local log; log="$(task_log_path "$m" "$id")"
+    local window; window="$(meta_field "$m" window)"
+    if [[ -z "$window" ]]; then
+      if [[ "$kind" == "chat" ]]; then
+        window="${SESSION}:chat-${id}"
+      else
+        window="${SESSION}:task-${id}"
+      fi
+    fi
+
+    local window_name="${window##*:}"
+    local exists=0
+    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
+      exists=1
+    fi
+
+    local follow_window="follow-${id}"
+    local follow_exists=0
+    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$follow_window"; then
+      follow_exists=1
+    fi
+
+    [[ "$exists" == "1" || "$follow_exists" == "1" ]] || continue
+
+    echo "closing $id  agent=${agent:-?}  orch=${orch:-?}  cwd=${cwd:-?}"
+    echo "  tmux kill-window -t ${window}"
+    [[ "$follow_exists" == "1" ]] && echo "  tmux kill-window -t ${SESSION}:${follow_window}"
+
+    if [[ "$dry_run" == "1" ]]; then
+      continue
+    fi
+
+    [[ "$exists" == "1" ]] && tmux kill-window -t "$window" 2>/dev/null || true
+    [[ "$follow_exists" == "1" ]] && tmux kill-window -t "${SESSION}:${follow_window}" 2>/dev/null || true
+
+    if [[ -f "$log" ]] && ! grep -qE '^ENDY_EXIT=' "$log" 2>/dev/null; then
+      printf '\n[endy-watch] killed by kill-all\nENDY_EXIT=130\n' >> "$log"
+    fi
+    closed=$((closed + 1))
+  done
+  shopt -u nullglob
+
+  echo
+  echo "matched=${matched}"
+  echo "closed=${closed}"
+  echo
+  echo "tmux commands:"
+  echo "  tmux attach -t ${SESSION}"
+  echo "  tmux list-windows -t ${SESSION}"
+  echo "  tmux kill-session -t ${SESSION}    # stop the entire endy tmux session"
+}
+
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
 case "${1:-attach}" in
   attach|"")     shift || true; cmd_attach "$@" ;;
-  list|ls)       cmd_list ;;
+  list|ls)       shift; cmd_list "$@" ;;
+  tree)          shift; cmd_tree "$@" ;;
+  dir)           shift; cmd_dir "$@" ;;
   log)           shift; cmd_log "$@" ;;
   view)          shift; cmd_view "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
-  browse)        cmd_browse ;;
+  chat)          shift; cmd_chat "$@" ;;
+  browse)        shift; cmd_browse "$@" ;;
   panel)         shift; cmd_panel "$@" ;;
   followup)      shift; cmd_followup "$@" ;;
   kill)          shift; cmd_kill "$@" ;;
+  kill-all|close-all) shift; cmd_kill_all "$@" ;;
   -h|--help|help)
-    sed -n '2,22p' "$0"
+    sed -n '2,51p' "$0"
     ;;
   *)
-    echo "usage: $(basename "$0") [attach [<id>] | list | log <id> | view <id> | follow <id> | browse | panel [--all] | followup <id> [-- <prompt>] | kill <id>]" >&2
+    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything]" >&2
     exit 2
     ;;
 esac

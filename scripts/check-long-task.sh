@@ -24,14 +24,23 @@ log_looks_failed() {
     || grep -qE 'Reached maximum (conversation )?turns|response may be incomplete' "$f" 2>/dev/null
 }
 
+meta_field() {
+  local meta="$1" field="$2"
+  grep "^${field}=" "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
 if [[ "${1:-}" == "--list" ]]; then
   shopt -s nullglob
   for m in "${LOG_DIR}"/task-*.meta; do
     id="$(basename "$m" .meta | sed 's/^task-//')"
-    spawned="$(grep '^spawned_at=' "$m" | cut -d= -f2-)"
-    agent="$(grep '^agent=' "$m" | cut -d= -f2-)"
-    log="${LOG_DIR}/task-${id}.log"
-    if grep -qE '^ENDY_EXIT=[0-9]+' "$log" 2>/dev/null; then
+    spawned="$(meta_field "$m" spawned_at)"
+    agent="$(meta_field "$m" agent)"
+    kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    log="$(meta_field "$m" log)"; log="${log:-${LOG_DIR}/task-${id}.log}"
+    window="$(meta_field "$m" window)"
+    if [[ ! -f "$log" ]]; then
+      st="$([[ "$kind" == "chat" ]] && echo CHAT || echo PENDING)"
+    elif grep -qE '^ENDY_EXIT=[0-9]+' "$log" 2>/dev/null; then
       ec="$(grep -E '^ENDY_EXIT=[0-9]+' "$log" | tail -1 | cut -d= -f2)"
       if [[ "$ec" == "0" ]]; then
         if log_looks_failed "$log"; then
@@ -42,6 +51,10 @@ if [[ "${1:-}" == "--list" ]]; then
       else
         st="FAILED($ec)"
       fi
+    elif [[ -n "$window" ]] && ! tmux list-windows -t "${window%%:*}" 2>/dev/null | grep -q "^[0-9]*: ${window##*:}"; then
+      st="ABANDONED"
+    elif [[ "$kind" == "chat" ]]; then
+      st="CHAT"
     else
       st="RUNNING"
     fi
@@ -59,16 +72,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-LOG="${LOG_DIR}/task-${TASK_ID}.log"
 META="${LOG_DIR}/task-${TASK_ID}.meta"
+LOG="${LOG_DIR}/task-${TASK_ID}.log"
+KIND="spawn"
+if [[ -f "$META" ]]; then
+  meta_log="$(meta_field "$META" log)"
+  [[ -n "$meta_log" ]] && LOG="$meta_log"
+  KIND="$(meta_field "$META" kind)"; KIND="${KIND:-spawn}"
+fi
 
 if [[ ! -f "$LOG" ]]; then
-  echo "UNKNOWN  no log at $LOG"
+  if [[ "$KIND" == "chat" ]]; then
+    echo "CHAT  no log yet at $LOG"
+  else
+    echo "UNKNOWN  no log at $LOG"
+  fi
   exit 1
 fi
 
 window=""
-[[ -f "$META" ]] && window="$(grep '^window=' "$META" | cut -d= -f2-)"
+[[ -f "$META" ]] && window="$(meta_field "$META" window)"
 
 if grep -qE '^ENDY_EXIT=[0-9]+' "$LOG" 2>/dev/null; then
   ec="$(grep -E '^ENDY_EXIT=[0-9]+' "$LOG" | tail -1 | cut -d= -f2)"
@@ -83,6 +106,8 @@ if grep -qE '^ENDY_EXIT=[0-9]+' "$LOG" 2>/dev/null; then
   fi
 elif [[ -n "$window" ]] && ! tmux list-windows -t "${window%%:*}" 2>/dev/null | grep -q "^[0-9]*: ${window##*:}"; then
   echo "ABANDONED  tmux window ${window} no longer exists, no exit code recorded  log=${LOG}"
+elif [[ "$KIND" == "chat" ]]; then
+  echo "CHAT  log=${LOG}"
 else
   echo "RUNNING  log=${LOG}"
 fi
