@@ -55,13 +55,17 @@
     li.task .id { color: var(--fg-mute); }
     li.task .agent { color: var(--info); font-weight: 600; }
     li.task .persona { color: var(--fg-mute); }
+    li.task .orch { color: var(--accent); }
     li.task .runtime { margin-left: auto; color: var(--fg-mute); font-size: 12px; }
     li.task .status { font-size: 11px; padding: 2px 7px; border-radius: 4px; font-weight: 700; }
-    .status.RUN, .status.RUNNING, .status.PENDING { background: rgba(96,165,250,.15); color: var(--info); }
+    .status.RUN, .status.RUNNING, .status.PENDING, .status.CHAT { background: rgba(96,165,250,.15); color: var(--info); }
     .status.DONE { background: rgba(110,231,183,.15); color: var(--accent); }
     .status.DONE-ERR, .status.FAILED { background: rgba(251,191,36,.15); color: var(--warn); }
+    .status.ABANDONED { background: rgba(141,146,160,.14); color: var(--fg-mute); }
     li.task .last { margin-top: 8px; color: var(--fg-mute); font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     li.task .cwd { font-size: 11.5px; color: var(--fg-mute); margin-top: 2px; }
+    li.task.child { border-left: 3px solid var(--info); }
+    li.task .parent { color: var(--info); margin-left: 6px; }
 
     /* dialogs */
     dialog { background: var(--bg-elev); color: var(--fg); border: 1px solid #232838; border-radius: 14px; padding: 0; max-width: 92vw; width: 560px; box-shadow: 0 20px 80px rgba(0,0,0,.6); }
@@ -84,6 +88,8 @@
     dialog.log-view .meta { padding: 10px 16px; font-size: 12px; color: var(--fg-mute); display: flex; flex-wrap: wrap; gap: 14px; border-bottom: 1px solid #232838; }
     dialog.log-view .meta .k { color: var(--fg-mute); }
     dialog.log-view .meta .v { color: var(--fg); font-family: var(--mono); }
+    dialog.log-view .commands { padding: 10px 16px; border-bottom: 1px solid #232838; display: grid; gap: 4px; color: var(--fg-mute); font-family: var(--mono); font-size: 12px; }
+    dialog.log-view .commands code { color: var(--fg); }
     dialog.log-view pre { margin: 0; padding: 14px 16px; max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 
     .empty { color: var(--fg-mute); font-size: 13px; padding: 12px; text-align: center; }
@@ -151,10 +157,12 @@
   <dialog id="dlg-log" class="log-view">
     <header>
       <h3 id="log-title">task-…</h3>
+      <button id="log-followup" class="primary" style="font-size: 12px; padding: 6px 10px;">Follow up</button>
       <button id="log-kill" class="danger" style="font-size: 12px; padding: 6px 10px;">Kill</button>
       <button class="ghost" data-close>×</button>
     </header>
     <div class="meta" id="log-meta"></div>
+    <div class="commands" id="log-commands"></div>
     <pre id="log-pre"></pre>
   </dialog>
 
@@ -186,16 +194,26 @@
       if (cwd.length <= max) return cwd;
       return "…" + cwd.slice(-(max-1));
     };
+    const shortTaskRef = id => {
+      let s = String(id || "");
+      const dash = s.indexOf("-");
+      if (dash >= 0) s = s.slice(dash + 1);
+      return s.length > 13 ? "…" + s.slice(-12) : s;
+    };
 
     function taskItem(t) {
       const li = document.createElement("li");
-      li.className = "task";
+      li.className = t.parent_task ? "task child" : "task";
       li.dataset.id = t.task_id;
+      const parent = t.parent_task ? `<span class="parent">parent ${escapeHtml(shortTaskRef(t.parent_task))}</span>` : "";
       li.innerHTML = `
         <div class="row1">
           <span class="status ${t.status.split('(')[0]}">${t.status}</span>
+          <span class="orch">${escapeHtml(t.orchestrator_label || t.orchestrator || "manual")}</span>
           <span class="agent">${t.agent}</span>
+          ${t.model ? `<span class="persona">${escapeHtml(t.model)}</span>` : ""}
           <span class="persona">${t.persona || "ad-hoc"}</span>
+          ${parent}
           <span class="runtime">${fmtRuntime(t.runtime_s)}</span>
         </div>
         <div class="last">${t.last ? escapeHtml(t.last) : "—"}</div>
@@ -205,8 +223,8 @@
     }
 
     function renderTasks(tasks) {
-      const running = tasks.filter(t => t.status === "RUNNING" || t.status === "PENDING");
-      const recent = tasks.filter(t => !(t.status === "RUNNING" || t.status === "PENDING")).slice(0, 25);
+      const running = tasks.filter(t => t.status === "RUNNING" || t.status === "PENDING" || t.status === "CHAT");
+      const recent = tasks.filter(t => !(t.status === "RUNNING" || t.status === "PENDING" || t.status === "CHAT")).slice(0, 25);
       const $r = $("#list-running"), $rec = $("#list-recent");
       $r.innerHTML = running.length ? "" : `<div class="empty">No running tasks. Tap “+ Spawn” to start one.</div>`;
       running.forEach(t => $r.appendChild(taskItem(t)));
@@ -243,6 +261,7 @@
         if (!res.ok) throw new Error(data.error || data.stderr || "spawn failed");
         e.target.reset();
         dlgNew.close();
+        if (data.task_id) openLog(data.task_id);
       } catch (err) {
         alert("Spawn failed:\n" + err.message);
       } finally {
@@ -265,13 +284,25 @@
       // Initial dump of the last 200 lines
       const res = await fetch(`/api/tasks/${tid}`);
       const d = await res.json();
+      const win = d.window || `endy:task-${tid}`;
+      const shortParent = d.parent_task ? shortTaskRef(d.parent_task) : "";
       $("#log-meta").innerHTML = `
+        <div><span class="k">kind</span> <span class="v">${escapeHtml(d.kind || "spawn")}</span></div>
+        <div><span class="k">orch</span> <span class="v">${escapeHtml(d.orchestrator_label || d.orchestrator || "manual")}</span></div>
         <div><span class="k">agent</span> <span class="v">${escapeHtml(d.agent)}</span></div>
+        ${d.model ? `<div><span class="k">model</span> <span class="v">${escapeHtml(d.model)}</span></div>` : ""}
         <div><span class="k">persona</span> <span class="v">${escapeHtml(d.persona || "ad-hoc")}</span></div>
+        ${d.parent_task ? `<div><span class="k">parent</span> <span class="v">${escapeHtml(shortParent)}</span></div>` : ""}
         <div><span class="k">cwd</span> <span class="v">${escapeHtml(d.cwd || "—")}</span></div>
         <div><span class="k">spawned</span> <span class="v">${escapeHtml(d.spawned_at)}</span></div>
         <div><span class="k">runtime</span> <span class="v">${fmtRuntime(d.runtime_s)}</span></div>
         <div><span class="k">status</span> <span class="v">${escapeHtml(d.status)}</span></div>`;
+      $("#log-commands").innerHTML = `
+        <div><code>tmux attach -t endy</code></div>
+        <div><code>tmux select-window -t ${escapeHtml(win)}</code></div>
+        <div><code>endy watch follow ${escapeHtml(tid)}</code></div>
+        <div><code>endy watch chat ${escapeHtml(tid)}</code></div>
+        <div><code>endy watch followup ${escapeHtml(tid)} -- "&lt;next prompt&gt;"</code></div>`;
       const pre = $("#log-pre");
       pre.textContent = d.log_tail || "(empty log)";
       pre.scrollTop = pre.scrollHeight;
@@ -303,6 +334,23 @@
       } else {
         alert("Kill failed:\n" + (d.stderr || JSON.stringify(d)));
       }
+    });
+
+    $("#log-followup").addEventListener("click", async () => {
+      if (!currentLogTaskId) return;
+      const promptText = prompt(`Follow up task ${currentLogTaskId}`);
+      if (!promptText || !promptText.trim()) return;
+      const res = await fetch(`/api/tasks/${currentLogTaskId}/followup`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({prompt: promptText.trim()}),
+      });
+      const d = await res.json();
+      if (!res.ok || d.rc !== 0) {
+        alert("Followup failed:\n" + (d.error || d.stderr || JSON.stringify(d)));
+        return;
+      }
+      if (d.task_id) openLog(d.task_id);
     });
 
     // ── boot ──────────────────────────────────────────────────────────────

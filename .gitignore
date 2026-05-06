@@ -8,6 +8,9 @@ mcp-shims/node_modules/
 # claude code session metadata for this project
 .claude/
 
+# commandcode local session/taste metadata
+.commandcode/
+
 # editor / OS noise
 .DS_Store
 *.swp

@@ -8,6 +8,8 @@
 #                      [--cwd <dir>]
 #                      [--full-auto]                   # auto-approve permission prompts
 #                      [--max-turns <n>]               # cmd & hermes only; raise the tool-call ceiling
+#                      [--orchestrator <name>]          # logical parent/orchestrator label
+#                      [--orchestrator-agent <agent>]   # logical parent agent label
 #                      ( --prompt "<text>" | --prompt-file <path> )
 #
 # Output (stdout, machine-parseable):
@@ -42,6 +44,12 @@ prompt_file=""
 full_auto=0
 resume_id=""
 parent_task=""
+orchestrator=""
+orchestrator_agent="${ENDY_ORCHESTRATOR_AGENT:-}"
+origin_cwd="$(pwd)"
+origin_pane="${TMUX_PANE:-}"
+origin_session=""
+origin_window=""
 # Default 200: cmd's hidden --max-turns silently caps complex tool-using
 # research at 10 unless raised (verified May 2026 v0.25.1). 200 is
 # generous enough for any reasonable agentic chain. User-pass --max-turns
@@ -60,6 +68,8 @@ while [[ $# -gt 0 ]]; do
     --max-turns)    max_turns="$2";    shift 2 ;;
     --resume)       resume_id="$2";    shift 2 ;;
     --parent-task)  parent_task="$2";  shift 2 ;;
+    --orchestrator) orchestrator="$2"; shift 2 ;;
+    --orchestrator-agent) orchestrator_agent="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,28p' "$0"; exit 0 ;;
     *)
@@ -75,6 +85,16 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' not running — run ${ENDY_ROOT}/scripts/start.sh first" >&2
   exit 3
 fi
+
+cd "$cwd" || { echo "cannot cd to --cwd: $cwd" >&2; exit 2; }
+cwd="$(pwd)"
+
+if [[ -n "$origin_pane" ]]; then
+  origin_session="$(tmux display-message -p -t "$origin_pane" '#S' 2>/dev/null || true)"
+  origin_window="$(tmux display-message -p -t "$origin_pane" '#W' 2>/dev/null || true)"
+fi
+orchestrator="${orchestrator:-${ENDY_ORCHESTRATOR:-}}"
+orchestrator="${orchestrator:-${origin_window:-manual}}"
 
 mkdir -p "$LOG_DIR"
 
@@ -153,6 +173,13 @@ tmux set-window-option -t "${SESSION}:${WINDOW_NAME}" remain-on-exit on 2>/dev/n
 
 cat > "$META_PATH" <<EOF
 task_id=${TASK_ID}
+kind=spawn
+orchestrator=${orchestrator}
+orchestrator_agent=${orchestrator_agent}
+origin_session=${origin_session}
+origin_window=${origin_window}
+origin_pane=${origin_pane}
+origin_cwd=${origin_cwd}
 agent=${agent}
 persona=${persona}
 model=${model}
@@ -170,4 +197,17 @@ TASK_ID=${TASK_ID}
 TMUX_WINDOW=${SESSION}:${WINDOW_NAME}
 LOG=${LOG_PATH}
 META=${META_PATH}
+
+tmux commands:
+  tmux attach -t ${SESSION}
+  tmux select-window -t ${SESSION}:${WINDOW_NAME}
+  tmux list-windows -t ${SESSION}
+  tmux kill-window -t ${SESSION}:${WINDOW_NAME}
+
+endy commands:
+  endy watch view ${TASK_ID}
+  endy watch follow ${TASK_ID}
+  endy watch chat ${TASK_ID}
+  endy watch followup ${TASK_ID} -- "<next prompt>"
+  endy watch kill ${TASK_ID}
 EOF

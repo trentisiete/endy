@@ -6,7 +6,10 @@
 #
 # Lifecycle
 #   endy install                      Symlink configs/skills/agents into ~/. (idempotent.)
-#   endy start                        Open the 'endy' tmux session (orchestrator + opencode serve).
+#   endy start [--clean] [--no-attach] [--serve-opencode] [--logs]
+#                                     Open the 'endy' tmux session (orchestrator/watch/docs).
+#   endy orchestrator [name] [opts]   Open another orchestrator window for a cwd.
+#   endy tmux-help                    Show tmux command hints in status/help window.
 #   endy stop                         Kill the tmux session.
 #   endy status                       Show tmux + Codex MCP + Tailscale status.
 #   endy doctor                       Check that every agent CLI is installed and authed.
@@ -25,14 +28,20 @@
 #                                              Wraps scripts/spawn-long-task.sh; passes
 #                                              --full-auto by default unless --supervised.
 #   endy ask <agent> [opts] <prompt>           Short blocking call. Output to stdout.
+#   endy chat <agent> [opts]                   Interactive agent in a tmux window.
 #
 # Watching
 #   endy watch                        Read-only attach to the tmux session.
 #   endy watch list                   Enriched status table.
+#   endy watch tree [--all]           Group tasks by orchestrator and working directory.
+#   endy watch dir <path>             Show tasks under one working directory.
 #   endy watch log <id>               Follow one task's log (less +F).
+#   endy watch chat <id>              Open an interactive chat for a task.
 #   endy watch attach [<id>]          Read-only attach, optionally focusing a task window.
 #   endy watch panel [--all]          Tile view of running tasks.
 #   endy watch kill <id>              Kill a stuck task.
+#   endy watch kill-all --agent X     Close all task/chat/follow windows for an agent.
+#   endy watch kill-all --cwd DIR     Close all task/chat/follow windows under a dir.
 #
 # Web dashboard
 #   endy web                          Start the web dashboard. Binds to your
@@ -68,7 +77,7 @@ SESSION="endy"
 die() { echo "endy: $*" >&2; exit 1; }
 
 show_help() {
-  sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Run an agent CLI with the endy project as the cwd if --root is passed,
@@ -97,6 +106,20 @@ cmd_start()    { exec "${SCRIPTS}/start.sh"   "$@"; }
 cmd_status()   { exec "${SCRIPTS}/status.sh"  "$@"; }
 cmd_watch()    { exec "${SCRIPTS}/endy-watch.sh" "$@"; }
 cmd_web()      { exec python3 "${ENDY_ROOT}/web/server.py" "$@"; }
+cmd_tmux_help(){ exec "${SCRIPTS}/tmux-help.sh" "$@"; }
+
+safe_window_name() {
+  printf '%s\n' "$1" | tr -cs '[:alnum:]_.-' '-' | sed 's/^-//; s/-$//; s/^$/orchestrator/'
+}
+
+focus_tmux_window() {
+  local target="$1"
+  tmux select-window -t "$target" 2>/dev/null || true
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "$target"
+  fi
+  exec tmux attach -t "$target"
+}
 
 cmd_stop() {
   if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -132,6 +155,91 @@ cmd_doctor() {
     printf '· down (run: endy start)\n'
   fi
   [[ "$ok" == "1" ]] || exit 1
+}
+
+cmd_orchestrator() {
+  local name=""
+  local agent="codex"
+  local cwd="$(pwd)"
+  local attach=1
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent)     agent="$2"; shift 2 ;;
+      --cwd|--dir) cwd="$2"; shift 2 ;;
+      --no-attach) attach=0; shift ;;
+      *)           if [[ -z "$name" ]]; then name="$1"; else die "unexpected arg: $1"; fi; shift ;;
+    esac
+  done
+
+  [[ -n "$name" ]] || name="$(basename "$cwd")"
+  cd "$cwd" || die "cannot cd to $cwd"
+  cwd="$(pwd)"
+
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    die "tmux session '$SESSION' is not running; run: endy start"
+  fi
+
+  local safe; safe="$(safe_window_name "$name")"
+  local window="orch-${safe}"
+  local target="${SESSION}:${window}"
+
+  if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$window"; then
+    echo "orchestrator window already exists: $target"
+    echo "tmux commands:"
+    echo "  tmux attach -t ${SESSION}"
+    echo "  tmux select-window -t ${target}"
+    [[ "$attach" == "1" ]] && focus_tmux_window "$target"
+    return 0
+  fi
+
+  local argv=()
+  case "$agent" in
+    codex) argv=(codex) ;;
+    opencode) argv=(opencode) ;;
+    cmd|commandcode) argv=(cmd) ;;
+    hermes) argv=(hermes chat) ;;
+    *) die "unknown orchestrator agent: $agent" ;;
+  esac
+
+  local quoted_argv=""
+  local a
+  for a in "${argv[@]}"; do
+    quoted_argv+=" $(printf '%q' "$a")"
+  done
+  local q_name; q_name="$(printf '%q' "$name")"
+  local q_cwd; q_cwd="$(printf '%q' "$cwd")"
+
+  local script="
+clear
+export ENDY_ORCHESTRATOR=${q_name}
+export ENDY_ORCHESTRATOR_CWD=${q_cwd}
+export ENDY_ORCHESTRATOR_AGENT=$(printf '%q' "$agent")
+printf '\033[1;36mendy orchestrator: %s\033[0m\n' ${q_name}
+printf '\033[1;33mcwd: %s\033[0m\n' ${q_cwd}
+printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b d detach | Ctrl-b & kill window | Ctrl-b x kill pane\033[0m\n'
+printf '\033[1;33mendy: endy watch tree | endy watch browse | endy watch dir %q\033[0m\n\n' ${q_cwd}
+exec ${quoted_argv}
+"
+  tmux new-window -t "$SESSION" -n "$window" -c "$cwd" "bash -lc $(printf '%q' "$script")"
+  tmux set-window-option -t "$target" remain-on-exit on 2>/dev/null || true
+
+  echo "ORCHESTRATOR=${name}"
+  echo "TMUX_WINDOW=${target}"
+  echo "CWD=${cwd}"
+  echo
+  echo "tmux commands:"
+  echo "  tmux attach -t ${SESSION}"
+  echo "  tmux select-window -t ${target}"
+  echo "  tmux kill-window -t ${target}"
+  echo
+  echo "endy commands:"
+  echo "  endy watch tree"
+  echo "  endy watch dir ${cwd}"
+  echo "  endy watch browse"
+
+  [[ "$attach" == "1" ]] && focus_tmux_window "$target"
+  return 0
 }
 
 cmd_spawn() {
@@ -200,6 +308,30 @@ cmd_ask() {
   esac
 }
 
+cmd_chat() {
+  local agent="${1:-}"
+  [[ -n "$agent" ]] || die "usage: endy chat <agent> [--persona X] [--model X] [--cwd DIR] [--resume ID] [--orchestrator X] [--orchestrator-agent X] [--full-auto] [--no-select]"
+  shift
+
+  local args=(--agent "$agent")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --persona|--agent|--skills) args+=(--persona "$2"); shift 2 ;;
+      --model)                    args+=(--model "$2"); shift 2 ;;
+      --cwd)                      args+=(--cwd "$2"); shift 2 ;;
+      --resume)                   args+=(--resume "$2"); shift 2 ;;
+      --parent-task)              args+=(--parent-task "$2"); shift 2 ;;
+      --orchestrator)             args+=(--orchestrator "$2"); shift 2 ;;
+      --orchestrator-agent)       args+=(--orchestrator-agent "$2"); shift 2 ;;
+      --full-auto)                args+=(--full-auto); shift ;;
+      --no-select)                args+=(--no-select); shift ;;
+      *) die "unknown chat arg: $1" ;;
+    esac
+  done
+
+  exec "${SCRIPTS}/spawn-chat.sh" "${args[@]}"
+}
+
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
@@ -207,6 +339,8 @@ cmd_ask() {
 case "${1:-help}" in
   install)  shift; cmd_install "$@" ;;
   start)    shift; cmd_start "$@" ;;
+  orchestrator|orch) shift; cmd_orchestrator "$@" ;;
+  tmux-help|help-tmux) shift; cmd_tmux_help "$@" ;;
   stop)     shift; cmd_stop "$@" ;;
   status)   shift; cmd_status "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;
@@ -214,6 +348,7 @@ case "${1:-help}" in
   web)      shift; cmd_web "$@" ;;
   spawn)    shift; cmd_spawn "$@" ;;
   ask)      shift; cmd_ask "$@" ;;
+  chat)     shift; cmd_chat "$@" ;;
 
   codex)    shift; run_agent codex "$@" ;;
   opencode) shift; run_agent opencode "$@" ;;

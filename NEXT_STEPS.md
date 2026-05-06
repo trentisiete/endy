@@ -23,10 +23,18 @@ Before touching code:
 - ✅ `endy doctor` — checks tmux + 4 CLIs + AGENTS.md + tmux session. Tested.
 - ✅ `endy ask <agent> "<prompt>"` — short blocking calls, tested with opencode (`ENDY-CLI-OK`) and cmd (`CMD-CLI-OK`).
 - ✅ `endy spawn <agent> -- "<prompt>"` — long detached spawn. Tested with all four agent types. Long prompts (>2KB) work via `$(cat $PROMPT_PATH)` runtime expansion (don't revert to `tmux send-keys` typing the whole prompt — see "Why we don't send-keys" below).
-- ✅ `endy watch list / log / view / follow / browse / panel / kill` — all working.
+- ✅ `endy watch list / tree / dir / log / view / follow / browse / panel / kill` — all working.
   - Multiple parallel `follow` windows confirmed (TASK-ALPHA + TASK-BRAVO simultaneously).
-  - Browse uses fzf 0.71+ with `--preview-window=…:follow` for live tail in the right pane.
+  - Browse uses fzf 0.71+ with `--preview-window=right:50%:wrap:follow` for live tail in the right pane, and supports `--cwd` / `--orch` filters.
   - `^Y` in browse copies task id to system clipboard via pbcopy.
+- ✅ Orchestrator/source metadata — new spawns record `orchestrator`, `orchestrator_agent`, `origin_window`, `origin_pane`, `origin_cwd`; `endy watch tree` groups by orchestrator first and directory second.
+- ✅ `endy orchestrator <name> --cwd <dir>` — opens additional orchestrator tmux windows with `ENDY_ORCHESTRATOR` exported so subagents are attributed to the right manager/workstream.
+- ✅ `endy tmux-help` / `endy start` tmux hints — status line shows the key tmux commands and a persistent `tree` window auto-refreshes the orchestrator/directory view plus delete/window/chat/watch commands.
+- ✅ `endy start --clean --no-attach` — recreates manager layout without attaching: window 1 `watch` runs `endy watch browse`, window 2 `docs` opens README/NEXT_STEPS, window 3 `tree` auto-refreshes `endy watch tree`, and stale `task-*`/`chat-*`/`follow-*`/`panel`/`tree`/`help`/`opencode`/`logs` windows are closed.
+- ✅ `opencode serve` is now opt-in via `endy start --serve-opencode --logs`; it no longer appears as a noisy default manager window.
+- ✅ `endy watch browse` is now active-task and chat-first: default view shows only active tasks/chats, `--all` includes history; Enter opens `endy watch chat <id>` and switches to it, `^O` opens chat in the background and keeps browse open, `^F` opens a live follow window, `^V` views, `^L` logs, `^K` kills.
+- ✅ `endy watch kill-all` — closes matching task/chat/follow windows by `--agent`, `--cwd`, `--orch`, or explicit `--everything`, and prints the tmux commands for full-session shutdown.
+- ✅ `ORCH` now supports `orchestrator_agent`: new tasks can display labels such as `orchestrator[codex]` or `mobile[cmd]`; manual spawns can set it with `--orchestrator-agent`. Old smoke-test labels (`smoke`, `verify`) remain in historical logs only.
 - ✅ Web dashboard at `endy web` — Python stdlib server, SSE for live tasks list and log streams, POST `/api/tasks` spawns through the same `spawn-long-task.sh`. Smoke-tested end-to-end (`WEB-API-OK`).
 - ✅ Status heuristics — `RUN`, `PENDING`, `DONE`, `DONE-ERR`, `FAIL(<n>)`, `ABANDONED`. The `DONE-ERR` heuristic catches `Reached maximum turns`, `Error:`, `Exception:`, `auto-rejecting`, `ProviderModelNotFoundError`, `Unauthorized`, `forbidden`, `model not found`. The `ABANDONED` detection looks for missing tmux window + no `ENDY_EXIT`.
 - ✅ Persona files for opencode (`refactor`, `test-writer`) load correctly with `mode: all` and `permission:` grants.
@@ -34,15 +42,16 @@ Before touching code:
 
 ---
 
-## What's implemented but UN-TESTED end-to-end
+## Remaining end-to-end verification
 
-These have code in place, parsed and syntax-checked, but no live smoke test landed in `.logs/`. **Verify before claiming done.**
+Only Hermes native resume still needs a live smoke. opencode and cmd followups are already smoke-tested with real tasks in `.logs/`.
 
-### `endy watch followup <id> [-- <new-prompt>]`
+- opencode parent `20260506-115916-2f59` → followup `20260506-115957-7554`, native `resume_id=ses_20345bfb1ffef6sbOL30HqrpE9`, output `ENDY-OPENCODE-FOLLOWUP-SMOKE`.
+- cmd parent `20260506-115925-3bdf` → followup `20260506-120006-657a`, context injection, output `ENDY-CMD-FOLLOWUP-SMOKE`.
 
-**File:** `scripts/endy-watch.sh` (function `cmd_followup`), `scripts/spawn-long-task.sh` (new `--resume` and `--parent-task` flags).
+**Files:** `scripts/endy-watch.sh` (`cmd_followup`), `scripts/spawn-long-task.sh` (`--resume`, `--parent-task`).
 
-**Strategy per agent (verified docs/help):**
+**Strategy per agent:**
 
 | Agent | Approach | How |
 |-------|----------|-----|
@@ -51,63 +60,74 @@ These have code in place, parsed and syntax-checked, but no live smoke test land
 | cmd | **Context injection** (no headless resume exists) | Prepend last 80 lines of parent log + parent meta into the new prompt; spawn fresh |
 | claude | Untested | TBD |
 
-**Acceptance criteria for "verified":**
+**Hermes acceptance check:**
 
-1. Spawn a hermes parent task: `endy spawn hermes -- "Your name is FluffyTeapot. Just say 'OK FluffyTeapot here.'"` — wait for `DONE`.
-2. Followup: `endy watch followup <hermes-parent-id> -- "What's your name?"` — output should contain "FluffyTeapot" (proves the session was resumed, not a fresh hermes that doesn't know).
-3. Same dance with opencode. The new task's `.meta` should have `parent_task=<original-id>` and `resume_id=<session-id-or-empty>`.
-4. cmd followup: spawn parent + followup; the new prompt should contain the `[endy followup — parent task ...]` header with the excerpt. Verify the model treats it as continuation.
-5. `endy watch list` should show the new task with `parent_task` link visible somewhere (currently the column doesn't render this — see "Polish work" below).
+1. `endy spawn hermes -- "Your name is FluffyTeapot. Just say 'OK FluffyTeapot here.'"`.
+2. Wait for `DONE`.
+3. `endy watch followup <hermes-parent-id> -- "What's your name?"`.
+4. Output should contain `FluffyTeapot`, and the followup `.meta` should have `parent_task=<original-id>` plus `resume_id=<hermes-session-id>`.
 
 **Risks to watch for:**
 
-- opencode's SQLite query is keyed by `directory`. If the parent task ran in a different cwd than what's now passed, it'll grab the wrong session or none. Test with explicit cwd.
 - hermes session_id might not appear in the log if the run was killed mid-stream (only emitted at clean exit). Followup should warn and fall back to context injection.
 - cmd's context-injection currently does `tail -n 80 | head -c 4000`. Tune if the model's continuation quality is poor.
 
 ---
 
-## Open work, in priority order
+## Recent verification notes
 
-### 1. Verify followup smoke-tests (above)
+### Multi-orchestrator attribution with live subagents
 
-**Files:** none new — just run the four scenarios in the acceptance criteria above and report what works.
+**Done 2026-05-06.** Files: `bin/endy`, `scripts/spawn-long-task.sh`, `scripts/spawn-chat.sh`, `scripts/endy-watch.sh`, `web/server.py`.
 
-**Effort:** 30 min if everything works first try. Up to 2 hours if hermes session_id format varies or opencode SQLite query needs adjustment.
+**Verified:**
+
+- `endy tmux-help` applied the status line; `tmux show-options -t endy status-right` contains `Ctrl-b n/p next/prev` and `Ctrl-b & kill window`.
+- `endy orchestrator smoke --cwd /Users/naudit/Downloads/endy --agent opencode --no-attach` created `endy:orch-smoke`; cleaned up with `tmux kill-window -t endy:orch-smoke`.
+- opencode smoke task `20260506-130607-9170` and cmd smoke task `20260506-130605-abed` both recorded `orchestrator=smoke`.
+- `endy watch list --orch smoke` showed both tasks with `ORCH=smoke`.
+- `endy watch tree --orch smoke --all` grouped them under `/Users/naudit/Downloads/endy`.
+- `endy watch chat 20260506-130607-9170 --no-attach` opened chat `20260506-130835-2783`, preserved `ORCH=smoke`, linked `parent_task=20260506-130607-9170`, then was closed with `endy watch kill`.
+- `endy start --clean --no-attach` recreated a clean tmux session with manager windows; after the chat-first/no-serve update the intended default is `0 orchestrator`, `1 watch`, `2 docs`, `3 tree`.
+- Verification agents launched through endy: cmd `20260506-185159-a448`, opencode `20260506-185200-4209`, both with `orchestrator=verify`.
+- cmd returned `CMD-VERIFY-PASS`. opencode returned `OPENCODE-VERIFY-PASS`; endy classified it as `DONE-ERR` because the verifier tried one invalid `rg --include` command before correcting itself.
+- Follow-up fix from verification: `web/server.py` now mirrors CLI `ABANDONED` detection by checking whether the task tmux window still exists; `web/index.html` renders an `ABANDONED` status class.
+
+**Still worth a manual pass:** open `endy watch browse --orch smoke` in a real terminal and press `^O`; fzf itself is interactive, so the automated smoke covered the underlying `watch chat` path instead.
 
 ---
 
-### 2. Render `parent_task` in `endy watch list` and the web dashboard
+### Parent links in CLI and web
 
-When a task has `parent_task=<id>` in its `.meta`, both the CLI table and the web dashboard should make this visible — at minimum a small indent or `↳` glyph linking to the parent. Currently the field is recorded but never displayed.
+**Done 2026-05-06.** When a task has `parent_task=<id>` in its `.meta`, both the CLI table and the web dashboard expose it.
 
-**Files to touch:**
+**Files touched:**
 
-- `scripts/endy-watch.sh` — function `cmd_list`. Add a column or visual indicator.
-- `web/server.py` — `list_tasks()` already reads all meta fields; expose `parent_task` in the JSON.
-- `web/index.html` — render the parent link in the task card.
+- `scripts/endy-watch.sh` — `cmd_list` parent column.
+- `web/server.py` — `parent_task`, `resume_id`, and `kind` JSON fields.
+- `web/index.html` — parent marker in the task card.
 
-**Acceptance:** spawn parent + followup, both appear in `endy watch list` and on `/`, with the followup visually nested under or pointing to the parent.
+**Verified:** real opencode/cmd followups show parent refs in `endy watch list` as `115916-2f59` / `115925-3bdf`. Web API exposes `parent_task`, `resume_id`, and `kind`; the dashboard renders parent markers.
 
 ---
 
-### 3. `endy chat <agent>` — persistent interactive sessions
+### `endy chat <agent>` — persistent interactive sessions
 
-Today every spawn is one-shot non-interactive. The user has asked for an "I want to actually talk to a running agent" mode. Sketch:
+**Basic implementation done 2026-05-06.** The user has asked for an "I want to actually talk to a running agent" mode.
 
 - `endy chat <agent> [--persona X]` opens a NEW tmux window running the agent in **interactive** mode (no `-Q` / `-p` / `-q`).
-- Use `tmux pipe-pane -o -t <window> 'cat >> .logs/chat-<id>.log'` to capture output for monitoring.
-- Meta gets a new field `kind=chat` (vs `kind=spawn`) so `endy watch list` can distinguish.
-- The user attaches to that window (`tmux attach -t endy`, navigate to it) and talks normally.
+- `tmux pipe-pane -o` captures output to `.logs/chat-<id>.log`.
+- Meta writes `kind=chat`, `log=chat-<id>.log`, and normal `task-<id>.meta`.
+- `endy watch list` shows active chats as `CHAT`; killed chats become `FAIL(130)` with last line `(interactive pane captured)` to avoid raw TUI control noise.
 - `endy watch follow` works on chat sessions too — the log file is the source of truth.
 
-**Files to touch:**
+**Files touched:**
 
 - New function in `bin/endy`: `cmd_chat`.
-- `scripts/spawn-long-task.sh` is fine for non-interactive; chat needs a sibling `scripts/spawn-chat.sh` OR a `--interactive` flag on the existing one (probably cleaner as a sibling).
-- `endy-watch.sh` `log_status` should treat chat sessions specially — they don't write `ENDY_EXIT` because they don't exit until the user does. Show as `CHAT` instead of `RUN`.
+- New sibling script: `scripts/spawn-chat.sh`.
+- `endy-watch.sh` `log_status` treats live chat sessions as `CHAT`.
 
-**Acceptance:** `endy chat opencode`, attach, type a few messages, see live in `endy watch list` and the web dashboard. `tmux pipe-pane` capture is reliable across detach/reattach cycles.
+**Verified:** `endy chat opencode --cwd /Users/naudit/Downloads/endy` created `20260506-120122-1142`, showed as `CHAT` in `endy watch tree`, captured the pane, and was closed with `endy watch kill`.
 
 **Risks:**
 
@@ -116,30 +136,32 @@ Today every spawn is one-shot non-interactive. The user has asked for an "I want
 
 ---
 
-### 4. Web dashboard: spawn-from-browser polish
+### Web dashboard: spawn-from-browser polish
 
 The dashboard already has a "+ Spawn" form that POSTs to `/api/tasks`. Improvements:
 
 - **Dropdown for agent/persona/model** populated from disk (`~/.codex/agents/*.toml` etc.) — currently the persona is a free-text input.
-- **Server-Sent Events for the new task's log** auto-opening when you submit, so you watch it in real time without an extra click.
-- **Followup button** on a task detail dialog: prompts for new text, calls a new endpoint `POST /api/tasks/<id>/followup`. Wire it through `endy watch followup`.
+- **Server-Sent Events for the new task's log** auto-opening when you submit, so you watch it in real time without an extra click. **Done 2026-05-06.**
+- **Followup button** on a task detail dialog: prompts for new text, calls a new endpoint `POST /api/tasks/<id>/followup`. **Done 2026-05-06.**
 - **Authentication beyond Tailscale** — currently any device on the user's Tailnet can use the dashboard. Add a simple shared-token check (header or query param) for the case where the user shares their Tailnet with others.
 
 **Files to touch:** `web/server.py`, `web/index.html`. The bash plumbing doesn't change.
 
 ---
 
-### 5. `endy chat resume <id>` — interactive resume
+### `endy chat resume <id>` — interactive resume
 
-Combination of #3 and the followup primitive. Open an interactive tmux window that loads the prior session via the agent's native `--resume` (hermes/opencode) or via context injection (cmd). User attaches and continues conversing.
+**Update 2026-05-06:** this now exists as `endy watch chat <id>`, with `^O chat` in `endy watch browse`.
 
-**Acceptance:** finish a hermes task; `endy chat resume <id>`; the new tmux window has hermes already loaded with prior context; user types a message, hermes answers as if the session never ended.
+Open an interactive tmux window that loads the prior session via the agent's native `--resume` (hermes/opencode) when available. `cmd` still has no reliable headless interactive resume, so it opens a fresh CommandCode terminal in the same cwd and records `parent_task=<id>`.
+
+**Still to verify:** finish a hermes task; `endy watch chat <id>`; the new tmux window has hermes already loaded with prior context; user types a message, hermes answers as if the session never ended.
 
 ---
 
-### 6. Audio interface (`endy speak <agent>`)
+### Audio interface (`endy speak <agent>`)
 
-Defer until 1-5 are done. Sketch:
+Defer until Hermes resume is verified and the manager UX has settled. Sketch:
 
 - Local STT via whisper.cpp or `WhisperX`.
 - Local TTS via piper / mac `say` / ElevenLabs.
@@ -150,7 +172,7 @@ Defer until 1-5 are done. Sketch:
 
 ---
 
-### 7. Hermes mobile gateway (PARKED — do not unparked without explicit user request)
+### Hermes mobile gateway (PARKED — do not unpark without explicit user request)
 
 R1 and R2 research is in `.logs/task-20260505-12{3945-66df,4000-ec37}.log`. Summary in [hermes/README.md](hermes/README.md). The blockers were security configuration complexity, not technical capability. If the user reopens, the gating list is:
 
@@ -220,8 +242,8 @@ These influence how Claude Code (the user's main IDE agent) interacts with this 
 
 ## Where to start
 
-If you have one slot of work, do **#1 (verify followup smoke tests)** — it's the only piece in critical path that's unverified, and verifying it tells you whether #2 and #3 can build on a stable foundation.
+If you have one slot of work, verify **Hermes native followup/resume** from the acceptance check above. opencode/cmd followups, parent display, chat, browse, tree, and kill-all are already implemented and smoke-tested.
 
-If you have a half-day, also tackle **#2 (parent_task display)** — it's small and removes a real UX friction.
+If you have a half-day, add `endy` shell completion and `endy help <agent>` pages. Those are polish, not blockers.
 
 Anything else, ask the user before starting.

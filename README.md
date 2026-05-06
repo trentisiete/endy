@@ -58,6 +58,40 @@ A multi-agent control plane for coding CLIs. Run **Codex**, **OpenCode**, **Comm
 
 ---
 
+## Quick start for managers
+
+```bash
+endy start --clean                 # create the manager tmux session
+tmux attach -t endy                # enter the session later
+tmux select-window -t endy:tree    # see active work grouped by orchestrator + cwd
+tmux select-window -t endy:watch   # open the interactive task browser
+```
+
+The default session layout is:
+
+| Window | Purpose |
+|--------|---------|
+| `0 orchestrator` | Main Codex orchestrator, with `ENDY_ORCHESTRATOR=orchestrator` and `ENDY_ORCHESTRATOR_AGENT=codex` exported. |
+| `1 watch` | `endy watch browse`, the interactive picker for active tasks/chats. |
+| `2 docs` | README + NEXT_STEPS opened in `less`. |
+| `3 tree` | Auto-refreshing `endy watch tree` grouped by orchestrator, then directory. |
+
+Daily loop:
+
+```bash
+endy watch tree                         # what is active, grouped by owner + directory
+endy watch browse                       # pick a task visually
+endy watch browse --cwd ~/work/payments # focus one repo
+endy watch browse --orch mobile         # focus one orchestrator/workstream
+endy watch chat <id>                    # open a typed follow-up terminal
+endy watch follow <id>                  # watch logs without disturbing the agent
+endy watch kill-all --cwd ~/work/foo    # close all task/chat/follow windows for a repo
+```
+
+In `browse`, press `Enter` to open chat and switch to it, `Ctrl-o` to open chat in the background while staying in browse, and `Ctrl-f` to open a live log-follow window.
+
+---
+
 ## Prerequisites
 
 | Tool | Why | Install |
@@ -157,7 +191,12 @@ tailscale ip -4              # note the 100.x.x.x IP — used by `endy web --tai
 
 ```
 endy install                          (re-)wire configs into ~/. (idempotent)
-endy start                            launch the 'endy' tmux session
+endy start [--clean] [--no-attach]    launch the 'endy' tmux session
+                                      window 1 = watch, window 2 = docs, window 3 = tree
+                                      opts: --serve-opencode, --logs
+endy orchestrator [name] [opts]       open another orchestrator window
+                                      opts: --cwd <dir>, --agent codex|cmd|opencode|hermes
+endy tmux-help                        add/update the tmux command status line
 endy stop                             kill the session
 endy status                           tmux + Codex MCP + Tailscale state
 endy doctor                           which agents are installed/authed
@@ -171,6 +210,8 @@ endy <agent> --root                   run from the endy project root instead
 endy ask <agent> [opts] <prompt>      short blocking call, output to stdout
 endy spawn <agent> [opts] -- <prompt> long unsupervised task in a tmux window
                                       (--full-auto by default; --supervised opts out)
+endy chat <agent> [opts]              interactive agent in a tmux window,
+                                      captured into .logs/ as kind=chat
 
 endy watch                            (see "endy watch family" below)
 endy web [--tailnet | --localhost | --host <ip>] [--port <n>]
@@ -194,6 +235,15 @@ endy spawn hermes --max-turns 200 -- "..."
 
 # Continue a finished task's conversation
 endy watch followup 4b3c -- "Now also update the unit tests for those files."
+
+# Start a second orchestrator for another project
+endy orchestrator payments --cwd ~/work/payments
+endy watch tree
+
+# Start an interactive terminal you can type into
+endy chat opencode --cwd /path/to/project
+tmux attach -t endy
+tmux select-window -t endy:chat-<id>
 
 # Open Codex in the endy project root (full stack context loaded via AGENTS.md)
 endy codex --root
@@ -222,23 +272,30 @@ Both `cmd` and `hermes` have an internal turn budget for tool-using chains. **De
 
 ## The `endy watch` family
 
-All read-only by design, except `kill` and `followup`.
+Most commands are observational. Mutating commands are `chat`, `followup`, `kill`, and `kill-all`.
 
 ```
 endy watch                            attach to 'endy' tmux session (read-write)
 endy watch attach [<id>] [--strict]   attach with a task window pre-selected;
                                       --strict re-enables tmux read-only mode
                                       (blocks navigation too — rarely what you want)
-endy watch list                       enriched table: id / status / agent / persona /
-                                      cwd / runtime / last meaningful log line
+endy watch list                       enriched table: id / status / parent /
+                                      orchestrator / agent / persona / cwd / runtime / last
+endy watch tree [--all]               active tasks grouped by orchestrator + cwd
+endy watch dir <path> [--all]         tasks under one working directory
 endy watch log <id>                   `less +F` on that task's log file
+endy watch chat <id>                  open an interactive chat for that task's
+                                      agent/cwd; opencode/hermes resume when possible
 endy watch view <id>                  one-shot dump (meta + prompt + last 200 lines)
                                       paged through `less`
 endy watch follow <id>                NEW tmux window with prompt header + live tail
                                       Multiple calls → multiple windows. Watching task
                                       A is not interrupted when you also follow B.
-endy watch browse                     fzf interactive picker with live preview pane.
-                                      ^V view, ^L log, ^Y copy id to clipboard, ^K kill.
+endy watch browse                     fzf picker for active tasks/chats with live preview.
+                                      opts: --all, --cwd <dir>, --orch <name>.
+                                      Enter chat/switch, ^O open chat and stay,
+                                      ^F follow, ^V view, ^L log,
+                                      ^Y copy id to clipboard, ^K kill.
 endy watch panel [--all]              tile view of running tasks (warns if >4)
 endy watch followup <id> [-- <prompt>]
                                       Resume the conversation of an existing task.
@@ -247,6 +304,9 @@ endy watch followup <id> [-- <prompt>]
                                       Always spawns a NEW task with parent_task=<id>.
 endy watch kill <id>                  kill a stuck task (closes tmux window AND
                                       writes ENDY_EXIT=130 so it stops showing as RUNNING)
+endy watch kill-all --agent <name>    close all task/chat/follow windows for an agent
+endy watch kill-all --cwd <dir>       close all task/chat/follow windows under a dir
+endy watch kill-all --orch <name>     close all task/chat/follow windows for an orchestrator
 ```
 
 `<id>` everywhere accepts a unique prefix — `endy watch log 4b3c` is enough if no other task starts with `4b3c`.
@@ -256,6 +316,7 @@ endy watch kill <id>                  kill a stuck task (closes tmux window AND
 | Status | Meaning |
 |--------|---------|
 | `RUN` | task running; tmux window present, no `ENDY_EXIT=` marker yet |
+| `CHAT` | interactive `endy chat` window is open/captured; it does not exit until you close it |
 | `PENDING` | meta written but log file not started yet (small race window) |
 | `DONE` | `ENDY_EXIT=0`; no error patterns in the log |
 | `DONE-ERR` | `ENDY_EXIT=0` but the log contains `Error:` / `Exception:` / `Reached maximum turns` / `auto-rejecting` etc. — agent reported a problem despite exit 0 |
@@ -273,9 +334,28 @@ Ctrl-b 0..9                      # jump to window by number
 Ctrl-b w                         # interactive window picker with preview
 Ctrl-b ,                         # rename current window
 Ctrl-b d                         # detach (session keeps running)
+Ctrl-b x                         # kill current pane
+Ctrl-b &                         # kill current window
 tmux list-windows -t endy        # see all windows
 tmux kill-window -t endy:<name>  # kill one window
 tmux kill-session -t endy        # nuke everything (`endy stop` does this)
+```
+
+`endy start` and `endy tmux-help` also put the most-used tmux commands in the tmux status line and create a live `tree` window you can reopen with `tmux select-window -t endy:tree`.
+
+`endy start --clean` closes old `task-*`, `chat-*`, `follow-*`, `panel`, `watch`, `docs`, `tree`, `help`, `opencode`, and `logs` windows, then recreates the manager layout:
+
+```bash
+tmux select-window -t endy:watch      # task browser
+tmux select-window -t endy:docs       # README.md + NEXT_STEPS.md
+tmux select-window -t endy:tree       # live tree grouped by orchestrator + directory
+tmux kill-session -t endy             # stop the whole endy session
+```
+
+`opencode serve` is not part of the default manager layout anymore. Start it only when you explicitly want that local server:
+
+```bash
+endy start --serve-opencode --logs
 ```
 
 ### Following multiple tasks at once
@@ -288,6 +368,68 @@ Ctrl-b w                          # picker → see follow-4b3c and follow-a104 s
 ```
 
 Each `follow` window stays alive (`remain-on-exit on`) so even after the underlying task ends, you can scroll back through it.
+
+### Taking Over A Task
+
+```bash
+endy watch browse                 # pick a task visually
+Enter                             # open interactive chat and switch to it
+Ctrl-o                            # open chat but stay in browse
+Ctrl-f                            # open a live log follow window instead
+```
+
+Or directly:
+
+```bash
+endy watch chat 4b3c
+```
+
+For `opencode` and `hermes`, endy tries to resume the task's native session before opening the interactive terminal. For `cmd`, there is no reliable headless interactive resume, so endy opens CommandCode in the same working directory and links the new chat back to the parent task.
+
+### Manager Workflows
+
+Open one orchestrator per project or workstream:
+
+```bash
+endy start
+endy orchestrator payments --cwd ~/work/payments
+endy orchestrator mobile --agent cmd --cwd ~/work/mobile
+```
+
+Each subagent spawned from those orchestrator windows records `orchestrator`, `orchestrator_agent`, `origin_window`, `origin_pane`, and `origin_cwd` in its meta file. In the UI this appears as `ORCH`, for example `mobile[cmd]` or `orchestrator[codex]`. Then use:
+
+```bash
+endy watch tree                         # grouped by orchestrator, then directory
+endy watch dir ~/work/payments --all     # one project directory
+endy watch list --orch payments          # one orchestrator
+endy watch browse --cwd ~/work/payments  # visual picker for that project
+endy watch chat <id>                     # open a typed chat for follow-up
+endy watch kill-all --cwd ~/work/payments # close all task windows for that project
+```
+
+Older tasks that predate these fields show as `manual` or use the tmux window name if endy can infer it.
+
+For a manual spawn outside an orchestrator window, label both pieces explicitly:
+
+```bash
+endy spawn cmd --orchestrator ux-review --orchestrator-agent codex -- "<prompt>"
+```
+
+What the manager can do today:
+
+| Task | Command |
+|------|---------|
+| See every active subagent by orchestrator and directory | `endy watch tree` |
+| Include finished/failed history | `endy watch tree --all` |
+| Focus one repo | `endy watch dir ~/work/payments --all` |
+| Focus one orchestrator | `endy watch list --orch mobile` |
+| Open a chat for follow-up | `endy watch chat <id>` |
+| Open chat without leaving browse | `Ctrl-o` inside `endy watch browse` |
+| Follow logs without interrupting | `endy watch follow <id>` |
+| Stop one stuck task | `endy watch kill <id>` |
+| Stop all work for a repo | `endy watch kill-all --cwd ~/work/payments` |
+| Stop all work for an orchestrator | `endy watch kill-all --orch mobile` |
+| Stop endy completely | `tmux kill-session -t endy` or `endy stop` |
 
 ---
 
@@ -311,9 +453,10 @@ Endpoints:
 | GET | `/api/tasks/<id>/stream` | SSE: each new log line as `data: {"line":"…"}` |
 | GET | `/api/events` | SSE: full task list re-emitted on any change |
 | POST | `/api/tasks` | `{agent, persona?, cwd?, prompt, full_auto?}` → spawns |
+| POST | `/api/tasks/<id>/followup` | `{prompt}` → `endy watch followup <id>` |
 | DELETE | `/api/tasks/<id>` | Equivalent to `endy watch kill` |
 
-From your phone (over Tailscale): open `http://<mac-tailnet-ip>:9120/`. Mobile-first dashboard — task cards, "+ Spawn" sheet with agent picker, tap a task to follow its log live. Tailscale is the auth layer; the server never binds to a public address by default.
+From your phone (over Tailscale): open `http://<mac-tailnet-ip>:9120/`. Mobile-first dashboard — task cards, "+ Spawn" sheet with agent picker, parent-task markers, a Follow up button, tmux command snippets, and live log streaming. Tailscale is the auth layer; the server never binds to a public address by default.
 
 To keep the dashboard alive across SSH sessions, run it inside the endy tmux session:
 
@@ -372,6 +515,7 @@ endy/
 │   ├── start.sh                  tmux session launcher
 │   ├── status.sh
 │   ├── spawn-long-task.sh        the spawn primitive (write meta, open tmux, tee log)
+│   ├── spawn-chat.sh             interactive tmux chat primitive (pipe-pane capture)
 │   ├── check-long-task.sh        --list and per-id status query (machine-parseable)
 │   ├── endy-watch.sh             user-facing watch dispatcher
 │   └── _endy-preview.sh          fzf preview pane renderer for `endy watch browse`
@@ -387,8 +531,10 @@ endy/
 Every spawned task writes three files in `.logs/`:
 
 - `task-<id>.prompt.md` — the prompt verbatim, persisted at spawn time. Survives the run.
-- `task-<id>.meta` — `key=value` lines including `task_id`, `agent`, `persona`, `model`, `cwd`, `window`, `log`, `prompt`, `spawned_at` (ISO 8601 UTC), and (for followups) `parent_task` and `resume_id`. Append-only after spawn — `endy watch followup` uses these.
+- `task-<id>.meta` — `key=value` lines including `task_id`, `kind`, `orchestrator`, `origin_session`, `origin_window`, `origin_pane`, `origin_cwd`, `agent`, `persona`, `model`, `cwd`, `window`, `log`, `prompt`, `spawned_at` (ISO 8601 UTC), and (for followups/chats) `parent_task` and `resume_id`. Append-only after spawn — `endy watch followup`, `endy watch tree`, and the web dashboard use these.
 - `task-<id>.log` — `tee`'d stdout+stderr of the underlying agent CLI invocation. Always ends with a line `ENDY_EXIT=<n>` once the agent exits — that's how `check-long-task.sh` distinguishes RUNNING from DONE.
+
+Interactive `endy chat` sessions use the same `task-<id>.meta` and `task-<id>.prompt.md` convention, but set `kind=chat` and write pane capture to `chat-<id>.log`.
 
 Anything that reads `.logs/` and respects this contract is a valid endy front-end. The web dashboard, `endy watch list`, and the CLI all use the same files.
 
