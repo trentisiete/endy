@@ -80,6 +80,56 @@ show_help() {
   sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+# Extract the per-agent gotcha section from README.md so users don't have to
+# context-switch to the file. The README's "Per-CLI gotchas" section uses
+# `### <agent>` headings — we slice between one heading and the next `###`.
+show_agent_help() {
+  local agent="$1"
+  local readme="${ENDY_ROOT}/README.md"
+  [[ -f "$readme" ]] || die "README.md not found at $readme"
+
+  # Map endy agent name → README heading prefix (literal substring match)
+  local heading
+  case "$agent" in
+    opencode)        heading='### opencode' ;;
+    cmd|commandcode) heading='### cmd' ;;
+    hermes)          heading='### hermes' ;;
+    claude)          heading='### claude' ;;
+    tmux)            heading='### tmux specifics' ;;
+    *) die "no help page for agent '$agent' — try: opencode, cmd, hermes, claude, tmux" ;;
+  esac
+
+  awk -v h="$heading" -v agent_label="$agent" '
+    !in_section && index($0, h) == 1 {
+      in_section=1
+      print "endy help " agent_label
+      print "──────────────────────────────────────────────"
+      print; next
+    }
+    in_section && /^### / { exit }
+    in_section && /^---/  { exit }
+    in_section { print }
+  ' "$readme"
+}
+
+cmd_help() {
+  if [[ $# -eq 0 ]]; then
+    show_help
+    return 0
+  fi
+  case "$1" in
+    opencode|cmd|commandcode|hermes|claude|tmux) show_agent_help "$1" ;;
+    -h|--help|help)
+      cat <<'EOF'
+endy help                Show top-level usage
+endy help <agent>        Show per-CLI gotchas for an agent
+                         agents: opencode, cmd, hermes, claude, tmux
+EOF
+      ;;
+    *) die "no help topic '$1' — try: endy help <opencode|cmd|hermes|claude|tmux>" ;;
+  esac
+}
+
 # Run an agent CLI with the endy project as the cwd if --root is passed,
 # otherwise stay where we are. Either way, the AGENTS.md mechanism gives
 # the agent its endy context.
@@ -147,6 +197,25 @@ cmd_doctor() {
     printf '✓ ~/.codex/AGENTS.md\n'
   else
     printf '✗ not installed (run: endy install)\n'; ok=0
+  fi
+  printf 'cmd model ....... '
+  local cmd_cfg="${HOME}/.commandcode/config.json"
+  if [[ -f "$cmd_cfg" ]]; then
+    local cmd_model=""
+    if command -v jq >/dev/null 2>&1; then
+      cmd_model="$(jq -r '.model // empty' "$cmd_cfg" 2>/dev/null)"
+    else
+      # Fallback: grep the field. Tolerates spacing, single/double quotes.
+      cmd_model="$(grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$cmd_cfg" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    fi
+    if [[ -n "$cmd_model" && "$cmd_model" != "null" ]]; then
+      printf '✓ %s\n' "$cmd_model"
+    else
+      printf '! no model set in %s — set with: cmd → /model\n' "$cmd_cfg"
+    fi
+  else
+    printf '· no %s yet (cmd not yet configured)\n' "$cmd_cfg"
   fi
   printf 'tmux session .... '
   if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -356,7 +425,7 @@ case "${1:-help}" in
   hermes)   shift; run_agent hermes "$@" ;;
   claude)   shift; run_agent claude "$@" ;;
 
-  help|-h|--help) shift; show_help ;;
+  help|-h|--help) shift; cmd_help "$@" ;;
 
   '') show_help ;;
   *)
