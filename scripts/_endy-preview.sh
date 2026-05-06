@@ -67,29 +67,11 @@ if [[ -z "$model" && -f "$LOG" ]]; then
   esac
 fi
 
-# ── status (reuse the same logic as endy-watch.sh) ─────────────────────────
-status_label() {
-  if [[ ! -f "$LOG" ]]; then
-    [[ "$kind" == "chat" ]] && echo "CHAT" || echo "PENDING"
-    return
-  fi
-  if grep -qE '^ENDY_EXIT=[0-9]+' "$LOG" 2>/dev/null; then
-    local ec; ec="$(grep -E '^ENDY_EXIT=[0-9]+' "$LOG" | tail -1 | cut -d= -f2)"
-    if [[ "$ec" == "0" ]]; then
-      if grep -qE '(^|[^A-Za-z])(Error:|ERROR:|Exception:|Traceback)' "$LOG" 2>/dev/null \
-         || grep -qE '(ProviderModelNotFoundError|Unauthorized|forbidden|model not found|auto-rejecting)' "$LOG" 2>/dev/null \
-         || grep -qE 'Reached maximum (conversation )?turns|response may be incomplete' "$LOG" 2>/dev/null
-      then echo "DONE-ERR"
-      else echo "DONE"
-      fi
-    else echo "FAIL($ec)"
-    fi
-  elif [[ "$kind" == "chat" ]]; then echo "CHAT"
-  else echo "RUN"
-  fi
-}
+# Status heuristic — shared with endy-watch.sh.
+# shellcheck source=lib/status.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/status.sh"
 
-st="$(status_label)"
+st="$(endy_log_status "$LOG" "$ID" "$kind" "endy")"
 case "$st" in
   RUN|PENDING|CHAT) stc="${BLU}● ${st}${RST}" ;;
   DONE)          stc="${GRN}● ${st}${RST}" ;;

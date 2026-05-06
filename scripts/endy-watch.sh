@@ -306,58 +306,13 @@ resume_id_for_task() {
   printf '%s\n' "$sid"
 }
 
-# Single source of truth for the task-status heuristic. When adding new
-# patterns, also update check-long-task.sh's log_looks_failed() and the
-# matching block in web/server.py.
-log_status() {
-  local log="$1"
-  local task_id="${2:-}"
-  local kind="${3:-spawn}"
+# Status heuristic lives in scripts/lib/status.sh so the preview pane can
+# reuse it. Patch that file when adding new error patterns. NOTE: web/server.py
+# and check-long-task.sh have their own (parallel) copies — keep them in sync.
+# shellcheck source=lib/status.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/status.sh"
 
-  local exists_in_tmux=0
-  local expected_window="task-${task_id}"
-  [[ "$kind" == "chat" ]] && expected_window="chat-${task_id}"
-  if [[ -n "$task_id" ]] \
-     && tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null \
-        | grep -qx "$expected_window"; then
-    exists_in_tmux=1
-  fi
-
-  if [[ ! -f "$log" ]]; then
-    if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
-      echo "ABANDONED"
-    elif [[ "$kind" == "chat" ]]; then
-      echo "CHAT"
-    else
-      echo "PENDING"
-    fi
-    return
-  fi
-
-  if grep -qE '^ENDY_EXIT=[0-9]+' "$log" 2>/dev/null; then
-    local ec; ec="$(grep -E '^ENDY_EXIT=[0-9]+' "$log" | tail -1 | cut -d= -f2)"
-    if [[ "$ec" == "0" ]]; then
-      if grep -qE '(^|[^A-Za-z])(Error:|ERROR:|Exception:|Traceback)' "$log" 2>/dev/null \
-         || grep -qE '(ProviderModelNotFoundError|Unauthorized|forbidden|model not found|auto-rejecting)' "$log" 2>/dev/null \
-         || grep -qE 'Reached maximum (conversation )?turns|response may be incomplete' "$log" 2>/dev/null
-      then echo "DONE-ERR"
-      else echo "DONE"
-      fi
-    else
-      echo "FAIL($ec)"
-    fi
-    return
-  fi
-
-  # No ENDY_EXIT yet. If the tmux window is also gone, the task died silently.
-  if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
-    echo "ABANDONED"
-  elif [[ "$kind" == "chat" ]]; then
-    echo "CHAT"
-  else
-    echo "RUN"
-  fi
-}
+log_status() { endy_log_status "$@"; }
 
 # ---------------------------------------------------------------------------
 # list — enriched table
