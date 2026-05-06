@@ -97,10 +97,10 @@ link_dir() {
   shopt -u nullglob
 }
 
-say "1/5 Codex agents …"
+say "1/8 Codex agents …"
 link_dir "${ENDY_ROOT}/codex/agents" "${CODEX_DIR}/agents" toml
 
-say "2/5 Codex skills …"
+say "2/8 Codex skills …"
 mkdir -p "${CODEX_SKILLS_DIR}"
 shopt -s nullglob
 for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
@@ -121,16 +121,16 @@ for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
 done
 shopt -u nullglob
 
-say "3/5 OpenCode agents …"
+say "3/8 OpenCode agents …"
 link_dir "${ENDY_ROOT}/opencode/agents" "${OPENCODE_DIR}/agents" md
 
-say "4/7 CommandCode agents …"
+say "4/8 CommandCode agents …"
 link_dir "${ENDY_ROOT}/commandcode/agents" "${CMDCODE_DIR}/agents" md
 
 # ----------------------------------------------------------------------------
 # 5. Symlink AGENTS.md so every agent loads endy context globally.
 # ----------------------------------------------------------------------------
-say "5/7 Global AGENTS.md (so codex/cmd auto-load endy context) …"
+say "5/8 Global AGENTS.md (so codex/cmd auto-load endy context) …"
 link_one_file() {
   local src="$1" target="$2"
   if [[ -L "$target" ]]; then
@@ -152,7 +152,7 @@ link_one_file "${ENDY_ROOT}/AGENTS.md" "${CMDCODE_DIR}/AGENTS.md"
 # ----------------------------------------------------------------------------
 # 6. Optionally put `endy` on PATH via ~/.local/bin.
 # ----------------------------------------------------------------------------
-say "6/7 endy CLI entry-point …"
+say "6/8 endy CLI entry-point …"
 mkdir -p "${LOCAL_BIN}"
 link_one_file "${ENDY_ROOT}/bin/endy" "${LOCAL_BIN}/endy"
 case ":$PATH:" in
@@ -164,7 +164,47 @@ esac
 # ----------------------------------------------------------------------------
 # 7. Append/replace the MCP-server block in ~/.codex/config.toml
 # ----------------------------------------------------------------------------
-say "7/7 Codex MCP server config (currently commented out — bash mode active) …"
+# ----------------------------------------------------------------------------
+# 7. Shell completion — offer to add a source line to the user's rc file.
+# ----------------------------------------------------------------------------
+say "7/8 Shell completion (zsh + bash) …"
+COMPLETION_SRC="${ENDY_ROOT}/scripts/endy-completion.sh"
+if [[ -f "$COMPLETION_SRC" ]]; then
+  # Pick the rc that matches the user's login shell. Default to zsh on macOS.
+  rc=""
+  case "$(basename "${SHELL:-zsh}")" in
+    zsh)  rc="${HOME}/.zshrc"  ;;
+    bash) rc="${HOME}/.bashrc" ;;
+    *)    rc="" ;;
+  esac
+  src_line="source \"${COMPLETION_SRC}\""
+  bashcompinit_block="autoload -Uz compinit bashcompinit && compinit && bashcompinit"
+  if [[ -n "$rc" ]]; then
+    if [[ -f "$rc" ]] && grep -Fq "$src_line" "$rc"; then
+      ok "completion already sourced from $rc"
+    else
+      printf '\n# >>> endy completion (managed by endy install)\n' >> "$rc"
+      if [[ "$(basename "$rc")" == ".zshrc" ]]; then
+        # Ensure bashcompinit is enabled — only add if not already present.
+        if ! grep -Fq "bashcompinit" "$rc" 2>/dev/null; then
+          printf '%s\n' "$bashcompinit_block" >> "$rc"
+        fi
+      fi
+      printf '%s\n' "$src_line"           >> "$rc"
+      printf '# <<< endy completion\n'    >> "$rc"
+      ok "added completion source line to $rc — restart your shell to pick it up"
+    fi
+  else
+    warn "unknown shell '${SHELL:-?}' — source manually: $src_line"
+  fi
+else
+  warn "completion script not found at $COMPLETION_SRC"
+fi
+
+# ----------------------------------------------------------------------------
+# 8. Append/replace the MCP-server block in ~/.codex/config.toml
+# ----------------------------------------------------------------------------
+say "8/8 Codex MCP server config (currently commented out — bash mode active) …"
 
 # Render the snippet with __ENDY_ROOT__ substituted.
 RENDERED="$(sed "s|__ENDY_ROOT__|${ENDY_ROOT}|g" "${ENDY_ROOT}/codex/config.snippet.toml")"
