@@ -100,6 +100,8 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   open_manager_windows
   open_optional_windows
   configure_tmux_help
+  # Cap scrollback to limit per-pane RAM (overrides ~/.tmux.conf's 100000).
+  tmux set -g history-limit 25000
   tmux select-window -t "${SESSION}:orchestrator" 2>/dev/null || true
   if [[ "$attach" == "1" ]]; then
     echo "session '$SESSION' already running — attaching"
@@ -126,6 +128,9 @@ tmux send-keys -t "${SESSION}:orchestrator" \
 # windows 1 and 2: manager panes
 open_manager_windows
 open_optional_windows
+
+# Cap scrollback to limit per-pane RAM (overrides ~/.tmux.conf's 100000).
+tmux set -g history-limit 25000
 
 configure_tmux_help
 tmux select-window -t "${SESSION}:orchestrator"

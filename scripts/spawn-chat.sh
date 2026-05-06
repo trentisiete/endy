@@ -39,6 +39,7 @@ origin_session=""
 origin_window=""
 full_auto=0
 select_window=1
+initial_message=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --orchestrator-agent) orchestrator_agent="$2"; shift 2 ;;
     --full-auto)    full_auto=1;       shift   ;;
     --no-select)    select_window=0;   shift   ;;
+    --initial-message) initial_message="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,19p' "$0"; exit 0 ;;
     *)
@@ -94,10 +96,18 @@ case "$agent" in
   cmd|commandcode)
     cmd_argv=(cmd --skip-onboarding --trust)
     [[ "$full_auto" == "1" ]] && cmd_argv+=(--yolo)
-    [[ -n "$model" ]] && \
-      echo "warning: cmd has no --model flag; '$model' ignored. Use 'cmd model' interactively to set it." >&2
+    [[ -n "$resume_id" ]] && cmd_argv+=(-r "$resume_id")
+    explicit_model="$model"
+    if [[ -z "$model" ]]; then
+      if command -v jq >/dev/null 2>&1 && [[ -f "${HOME}/.commandcode/config.json" ]]; then
+        model="$(jq -r '.model // empty' "${HOME}/.commandcode/config.json" 2>/dev/null || true)"
+      fi
+    fi
+    [[ -n "$explicit_model" ]] && \
+      echo "info: cmd has no --model flag; '$explicit_model' recorded for metadata only. Use 'cmd model' interactively to set it." >&2
     [[ -n "$persona" ]] && \
       echo "warning: cmd has no --agent flag; '$persona' ignored. Personas only via /agents interactively." >&2
+    [[ -n "$initial_message" ]] && cmd_argv+=("$initial_message")
     ;;
   claude)
     cmd_argv=(claude)
