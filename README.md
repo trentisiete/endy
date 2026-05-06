@@ -43,6 +43,26 @@ A multi-agent control plane for coding CLIs. Run **Codex**, **OpenCode**, **Comm
 
 ---
 
+## One-shot install
+
+Already have at least one of `codex` / `opencode` / `cmd` / `hermes` installed and on `PATH`? Then:
+
+```bash
+git clone https://github.com/trentisiete/endy.git ~/Downloads/endy
+cd ~/Downloads/endy
+./scripts/install.sh --yes        # symlinks agents/skills/AGENTS.md, puts endy on PATH,
+                                  # wires shell completion into ~/.zshrc or ~/.bashrc
+exec "$SHELL" -l                  # reload so completion + PATH take effect
+endy doctor                       # confirm everything is wired up
+endy start --clean                # create the manager tmux session
+endy spawn opencode -- "say hi"   # smoke-test the spawn pipeline
+endy watch list                   # see your task land
+```
+
+If `endy` is not found after install, `~/.local/bin` is not on your `PATH` — the install warning tells you the line to add. See [Install](#install) below for the long-form, opt-in walk-through.
+
+---
+
 ## What endy is and isn't
 
 **Is:**
@@ -125,7 +145,10 @@ cd ~/Downloads/endy
 4. **Symlinks CommandCode agents** `commandcode/agents/*.md` → `~/.commandcode/agents/`.
 5. **Symlinks `AGENTS.md`** to `~/.codex/AGENTS.md` and `~/.commandcode/AGENTS.md` so Codex and `cmd` auto-load endy stack context on every session.
 6. **Symlinks `bin/endy`** to `~/.local/bin/endy`. If `~/.local/bin` is not on your `PATH`, you get a warning telling you what to add to `~/.zshrc`/`~/.bashrc`.
-7. **Appends an `[mcp_servers.*]` block** (currently commented out — bash mode is active) to `~/.codex/config.toml` between markers so the change is reversible.
+7. **Hooks shell completion** by appending a `source` line for `scripts/endy-completion.sh` into `~/.zshrc` (with `bashcompinit`) or `~/.bashrc`, gated by an idempotent marker block.
+8. **Appends an `[mcp_servers.*]` block** (currently commented out — bash mode is active) to `~/.codex/config.toml` between markers so the change is reversible.
+
+Pass `--yes` (or `-y`) to skip the interactive confirmation — handy for CI and quickstart pipes.
 
 Existing files at the target paths are renamed `*.bak.<unix-timestamp>` rather than overwritten.
 
