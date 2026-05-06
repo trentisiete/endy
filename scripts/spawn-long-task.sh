@@ -125,10 +125,17 @@ case "$agent" in
     # Pre-auth required: cmd login → ~/.commandcode/auth.json must exist.
     # --max-turns is undocumented in --help but accepted (verified May 2026 v0.25.1).
     cmd_argv=(cmd --skip-onboarding --trust)
+    explicit_model="$model"
+    if [[ -z "$model" ]]; then
+      if command -v jq >/dev/null 2>&1 && [[ -f "${HOME}/.commandcode/config.json" ]]; then
+        model="$(jq -r '.model // empty' "${HOME}/.commandcode/config.json" 2>/dev/null || true)"
+      fi
+    fi
     [[ "$full_auto" == "1" ]] && cmd_argv+=(--yolo)
     [[ -n "$max_turns" ]] && cmd_argv+=(--max-turns "$max_turns")
-    [[ -n "$model" ]] && \
-      echo "warning: cmd has no --model flag; '$model' ignored. Use 'cmd model' interactively to set it." >&2
+    [[ -n "$resume_id" ]] && cmd_argv+=(-r "$resume_id")
+    [[ -n "$explicit_model" ]] && \
+      echo "info: cmd has no --model flag; '$explicit_model' recorded for metadata only. Use 'cmd model' interactively to set it." >&2
     [[ -n "$persona" ]] && \
       echo "warning: cmd has no --agent flag; '$persona' ignored. Personas only via /agents interactively." >&2
     cmd_argv+=(-p)

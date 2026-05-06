@@ -34,21 +34,30 @@
 #   endy-watch browse [--all] [--cwd <dir>] [--orch <name>]
 #                                 Interactive picker. Uses fzf if installed
 #                                 (live preview in side pane); falls back to
-#                                 the table otherwise. Enter jumps to chat;
-#                                 ^O opens chat in the background.
+#                                 the table otherwise. Enter is smart:
+#                                 spawn-kind rows open a new chat in the
+#                                 background (browse stays focused);
+#                                 chat-kind rows focus the existing window
+#                                 (browse stays alive in tmux — prefix-l back).
+#                                 ^O always opens chat in background.
+#                                 ^G opens chat in foreground and exits.
 #   endy-watch panel [--all]      Tile view of running task logs. Warns if >4
 #                                 (suggest 'browse' or 'follow' instead).
 #   endy-watch followup <id> [-- <new-prompt>]
 #                                 Continue the conversation of an existing task.
 #                                 hermes/opencode → native session resume.
-#                                 cmd → context injection (no native headless
-#                                 resume). New tmux window, new TASK_ID, with
-#                                 parent_task pointing back to <id>.
+#                                 cmd → native resume by title (.meta.json),
+#                                 falls back to context injection. New tmux
+#                                 window, new TASK_ID, with parent_task
+#                                 pointing back to <id>.
 #   endy-watch kill <id>          Kill a stuck task (closes its tmux window AND
 #                                 writes ENDY_EXIT=130 to the log so it's not
 #                                 reported as RUNNING forever).
-#   endy-watch kill-all --agent <name> | --cwd <dir> | --orch <name> | --everything
+#   endy-watch gc [--dry-run]     Clean up dead windows (DONE / DONE-ERR / FAIL /
+#                                 ABANDONED). Safe, idempotent, zero risk to active tasks.
+#   endy-watch kill-all --agent <name> | --cwd <dir> | --orch <name> | --everything | --done
 #                                 Close every matching task/chat/follow window.
+#                                 --done limits scope to finished/failed/abandoned tasks.
 #   endy-watch help               This text.
 
 set -u
@@ -197,6 +206,16 @@ task_orchestrator_label() {
   fi
 }
 
+cmd_active_model() {
+  local cfg="${HOME}/.commandcode/config.json"
+  [[ -f "$cfg" ]] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.model // empty' "$cfg" 2>/dev/null
+  else
+    python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('model',''))" "$cfg" 2>/dev/null
+  fi
+}
+
 model_label() {
   local meta="$1" log="$2" agent="$3"
   local model; model="$(meta_field "$meta" model)"
@@ -208,9 +227,8 @@ model_label() {
           | tr -d '\r')"
         ;;
       cmd|commandcode)
-        model="$(strip_ansi < "$log" 2>/dev/null \
-          | awk -F 'model: ' '/model: / { print $2; exit }' \
-          | tr -d '\r')"
+        model="$(cmd_active_model)"
+        model="${model##*/}"
         ;;
     esac
   fi
@@ -271,6 +289,17 @@ resume_id_for_task() {
         sid="$(sqlite3 "$opencode_db" \
           "SELECT id FROM session WHERE directory = '$(printf %s "$cwd" | sed "s/'/''/g")' \
            ORDER BY time_created DESC LIMIT 1;" 2>/dev/null)"
+      fi
+      ;;
+    cmd|commandcode)
+      local slug="${cwd//\//-}"
+      slug="${slug#-}"  # strip leading dash from absolute paths
+      slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
+      local pdir="${HOME}/.commandcode/projects/${slug}"
+      if [[ -d "$pdir" ]] && command -v jq >/dev/null 2>&1; then
+        local newest_meta
+        newest_meta="$(ls -t "$pdir"/*.meta.json 2>/dev/null | head -1)"
+        [[ -n "$newest_meta" ]] && sid="$(jq -r '.title // empty' "$newest_meta" 2>/dev/null)"
       fi
       ;;
   esac
@@ -731,6 +760,8 @@ cmd_browse() {
   # Build the bind list. ctrl-y copies the id to the system clipboard so the
   # user never has to wrestle with terminal selection.
   local binds=(
+    "--bind=enter:execute-silent(${BASH_SOURCE[0]} _open {1})+refresh-preview"
+    "--bind=ctrl-g:execute(${BASH_SOURCE[0]} chat {1})+abort"
     "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {1})"
     "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {1})"
     "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {1})+abort"
@@ -741,9 +772,9 @@ cmd_browse() {
   local header
   if [[ -n "$copy_cmd" ]]; then
     binds+=("--bind=ctrl-y:execute-silent(printf %s {1} | ${copy_cmd})+abort")
-    header="enter→chat  ^O open chat  ^F follow  ^V view  ^L log  ^Y copy id  ^K kill  ^R refresh  esc cancel"
+    header="enter→smart (chat=focus, spawn=bg open)  ^O chat bg  ^G chat fg+exit  ^F follow  ^V view  ^L log  ^Y copy id  ^K kill  ^R refresh  esc cancel"
   else
-    header="enter→chat  ^O open chat  ^F follow  ^V view  ^L log  ^K kill  ^R refresh  esc cancel  (install pbcopy/xclip for ^Y copy)"
+    header="enter→smart (chat=focus, spawn=bg open)  ^O chat bg  ^G chat fg+exit  ^F follow  ^V view  ^L log  ^K kill  ^R refresh  esc cancel  (install pbcopy/xclip for ^Y copy)"
   fi
 
   local picked
@@ -760,8 +791,6 @@ cmd_browse() {
   # Strip ANSI from the picked row to extract the id.
   local picked_id; picked_id="$(printf '%s' "$picked" | strip_ansi | awk '{print $1}')"
   [[ -z "$picked_id" ]] && return 0
-
-  cmd_chat "$picked_id"
 }
 
 # ---------------------------------------------------------------------------
@@ -857,6 +886,30 @@ cmd_attach() {
 }
 
 # ---------------------------------------------------------------------------
+# open — fzf-Enter dispatcher: chat-kind → focus existing window;
+#         spawn-kind → open a new background chat. Keeps browse alive.
+# ---------------------------------------------------------------------------
+
+cmd_open() {
+  local prefix="${1:-}"
+  [[ -n "$prefix" ]] || return 0
+  local id; id="$(resolve_id "$prefix" 2>/dev/null)" || return 0
+  local meta; meta="$(task_meta_path "$id")"
+  [[ -f "$meta" ]] || return 0
+  local kind; kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
+  if [[ "$kind" == "chat" ]]; then
+    local window; window="$(meta_field "$meta" window)"
+    [[ -n "$window" ]] || window="${SESSION}:chat-${id}"
+    tmux select-window -t "$window" 2>/dev/null || true
+    if [[ -n "${TMUX:-}" ]]; then
+      tmux switch-client -t "$window" 2>/dev/null || true
+    fi
+  else
+    cmd_chat "$id" --no-attach
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # chat — open an interactive chat for an existing task
 # ---------------------------------------------------------------------------
 
@@ -903,13 +956,43 @@ cmd_chat() {
     return 0
   fi
 
-  local sid; sid="$(resume_id_for_task "$agent" "$cwd" "$log")"
-  if [[ -n "$sid" ]]; then
-    echo "opening interactive $agent chat resumed from task $id: $sid"
-  elif [[ "$agent" == "cmd" || "$agent" == "commandcode" ]]; then
-    echo "opening interactive cmd chat for task $id (cmd has no headless interactive resume)"
+  local sid=""
+  local initial_message=""
+  if [[ "$agent" == "cmd" || "$agent" == "commandcode" ]]; then
+    # cmd spawn-tasks have no reliable native resume path:
+    #  - cmd -p (the headless run) does NOT persist a session.
+    #  - Sessions in ~/.commandcode/projects/<slug>/ belong to UNRELATED
+    #    interactive chats; resume_id_for_task picks the newest, which
+    #    would resume the wrong conversation. Don't even try.
+    # Always inject the parent's prompt + log tail as the opening message.
+    local prompt_path; prompt_path="$(meta_field "$meta" prompt)"
+    [[ -n "$prompt_path" && -f "$prompt_path" ]] || prompt_path="${LOG_DIR}/task-${id}.prompt.md"
+    local original_prompt="" log_excerpt=""
+    [[ -f "$prompt_path" ]] && original_prompt="$(head -c 2000 "$prompt_path" 2>/dev/null)"
+    [[ -f "$log" ]] && log_excerpt="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
+                                      | strip_ansi | tail -n 60 | head -c 3000)"
+    if [[ -n "$original_prompt" || -n "$log_excerpt" ]]; then
+      initial_message="[endy: continuing from spawn-task ${id} — cmd headless runs don't persist, so context is injected here]
+
+--- original prompt ---
+${original_prompt}
+
+--- last output ---
+${log_excerpt}
+
+--- end of injected context ---
+"
+      echo "opening cmd chat for task $id (context injected; cmd -p doesn't persist sessions)"
+    else
+      echo "opening fresh cmd chat for task $id (no log/prompt to inject)"
+    fi
   else
-    echo "opening fresh interactive $agent chat for task $id (no session id found)"
+    sid="$(resume_id_for_task "$agent" "$cwd" "$log")"
+    if [[ -n "$sid" ]]; then
+      echo "opening interactive $agent chat resumed from task $id: $sid"
+    else
+      echo "opening fresh interactive $agent chat for task $id (no session id found)"
+    fi
   fi
 
   local spawn_args=(--agent "$agent" --cwd "$cwd" --parent-task "$id" --orchestrator "$orch")
@@ -918,6 +1001,7 @@ cmd_chat() {
   [[ -n "$sid"     ]] && spawn_args+=(--resume "$sid")
   [[ -n "$persona" ]] && spawn_args+=(--persona "$persona")
   [[ -n "$model"   ]] && spawn_args+=(--model "$model")
+  [[ -n "$initial_message" ]] && spawn_args+=(--initial-message "$initial_message")
 
   local out
   out="$("${ENDY_ROOT}/scripts/spawn-chat.sh" "${spawn_args[@]}")" || {
@@ -943,7 +1027,7 @@ cmd_chat() {
 # Per-CLI strategy (validated May 2026):
 #   hermes   → native: --resume <session_id>; id from `^session_id: ...$` in -Q
 #   opencode → native: --session <id>; id from sqlite (default log doesn't emit)
-#   cmd      → fallback: -p has no headless resume; we inject context
+#   cmd      → native resume by title from .meta.json; falls back to context injection
 #   claude   → untested; treated as "no native"
 
 cmd_followup() {
@@ -1044,6 +1128,7 @@ cmd_kill_all() {
   local orch_filter=""
   local everything=0
   local dry_run=0
+  local done_only=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1051,12 +1136,13 @@ cmd_kill_all() {
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
       --everything) everything=1; shift ;;
+      --done) done_only=1; shift ;;
       --dry-run) dry_run=1; shift ;;
-      *) echo "usage: endy watch kill-all (--agent <name> | --cwd <dir> | --orch <name> | --everything) [--dry-run]" >&2; exit 2 ;;
+      *) echo "usage: endy watch kill-all (--agent <name> | --cwd <dir> | --orch <name> | --everything | --done) [--dry-run]" >&2; exit 2 ;;
     esac
   done
 
-  if [[ -z "$agent_filter" && -z "$cwd_filter" && -z "$orch_filter" && "$everything" != "1" ]]; then
+  if [[ -z "$agent_filter" && -z "$cwd_filter" && -z "$orch_filter" && "$everything" != "1" && "$done_only" != "1" ]]; then
     echo "refusing to close every task without a filter; pass --everything if that is intentional" >&2
     exit 2
   fi
@@ -1078,6 +1164,10 @@ cmd_kill_all() {
     matched=$((matched + 1))
 
     local log; log="$(task_log_path "$m" "$id")"
+    if [[ "${done_only:-0}" == "1" ]]; then
+      local st; st="$(log_status "$log" "$id" "$kind")"
+      case "$st" in DONE|DONE-ERR|FAIL\(*\)|ABANDONED) ;; *) continue ;; esac
+    fi
     local window; window="$(meta_field "$m" window)"
     if [[ -z "$window" ]]; then
       if [[ "$kind" == "chat" ]]; then
@@ -1129,6 +1219,30 @@ cmd_kill_all() {
   echo "  tmux kill-session -t ${SESSION}    # stop the entire endy tmux session"
 }
 
+cmd_gc() {
+  require_session
+  local dry_run=0
+  [[ "${1:-}" == "--dry-run" ]] && dry_run=1
+  local cleaned=0
+  shopt -s nullglob
+  for m in "${LOG_DIR}"/task-*.meta; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local status; status="$(log_status "$log" "$id" "$kind")"
+    case "$status" in DONE|DONE-ERR|FAIL\(*\)|ABANDONED) ;; *) continue ;; esac
+    local window; window="$(meta_field "$m" window)"
+    [[ -z "$window" ]] && { [[ "$kind" == "chat" ]] && window="${SESSION}:chat-${id}" || window="${SESSION}:task-${id}"; }
+    local wn="${window##*:}"
+    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$wn"; then
+      [[ "$dry_run" == "1" ]] && echo "[dry] kill-window $window" || tmux kill-window -t "$window" 2>/dev/null
+      cleaned=$((cleaned + 1))
+    fi
+  done
+  shopt -u nullglob
+  echo "gc: cleaned $cleaned dead window(s)"
+}
+
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
@@ -1142,16 +1256,18 @@ case "${1:-attach}" in
   view)          shift; cmd_view "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
+  _open)         shift; cmd_open "$@" ;;
   browse)        shift; cmd_browse "$@" ;;
   panel)         shift; cmd_panel "$@" ;;
   followup)      shift; cmd_followup "$@" ;;
   kill)          shift; cmd_kill "$@" ;;
+  gc)            shift; cmd_gc "$@" ;;
   kill-all|close-all) shift; cmd_kill_all "$@" ;;
   -h|--help|help)
-    sed -n '2,51p' "$0"
+    sed -n '2,55p' "$0"
     ;;
   *)
-    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything]" >&2
+    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | gc [--dry-run] | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything]" >&2
     exit 2
     ;;
 esac
