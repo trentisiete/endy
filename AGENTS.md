@@ -51,6 +51,16 @@ Personas refuse out-of-scope work by design. If a task doesn't fit any persona, 
 - **Codex**: `multi_agent` flag is stable. `child_agents_md` (auto-loading nested AGENTS.md) is under-development as of May 2026 — assume only the global `~/.codex/AGENTS.md` and the project's `<cwd>/AGENTS.md` are read reliably.
 - **Exit codes**: opencode and cmd both sometimes exit 0 on internal errors. `endy watch` uses log heuristics to flag this as `DONE-ERR`.
 
+## Endy operational primitives
+
+A few endy commands worth knowing — they save time when debugging or onboarding:
+
+- `endy doctor` — checks tmux + every agent CLI + `AGENTS.md` symlinks + the cmd model setting (`~/.commandcode/config.json`). A blank cmd model is a common cause of silent spawn hangs.
+- `endy help <agent>` — prints the per-CLI gotcha section straight out of `README.md`. Agents: `opencode`, `cmd`, `hermes`, `claude`, `tmux`. Use this before guessing why a flag is being ignored.
+- Shell completion — `scripts/endy-completion.sh` covers subcommands, agents, watch ops, and help topics in both bash and zsh. `endy install` wires it in via a marked block in your rc file; pass `--yes` for non-interactive installs (CI/quickstart).
+- Web dashboard — `endy web` defaults to a Tailnet-only bind (no public exposure). For shared Tailnets, set `ENDY_WEB_TOKEN=<value>` before launch; clients must then send `X-Endy-Token: <value>` or `?token=<value>`. Persona dropdowns auto-populate from `opencode/agents/`, `commandcode/agents/`, and `codex/agents/` in this repo.
+- Status heuristic — `scripts/lib/status.sh` is the single bash source of truth for `RUN/PENDING/DONE/DONE-ERR/FAIL/ABANDONED/CHAT`. `endy-watch.sh` and `_endy-preview.sh` both source it; web/server.py and check-long-task.sh keep parallel copies — patch them all when you add a new error pattern.
+
 ## File and directory conventions
 
 - This project is at `$HOME/Downloads/endy/` (or wherever you cloned it). The `endy` CLI is at `bin/endy`.

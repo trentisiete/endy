@@ -18,6 +18,23 @@ set -euo pipefail
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TS="$(date +%s)"
 
+# --yes / -y skips the interactive confirmation prompt. Useful for CI,
+# Docker images, and `curl | bash` quickstart flows.
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) ASSUME_YES=1 ;;
+    -h|--help)
+      cat <<EOF
+endy install [--yes|-y]
+  Symlink endy's agents/skills/AGENTS.md into the live agent dirs and
+  put bin/endy on PATH. Idempotent — safe to re-run.
+EOF
+      exit 0 ;;
+    *) printf 'install: unknown arg: %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
 CODEX_DIR="${HOME}/.codex"
 CODEX_SKILLS_DIR="${CODEX_DIR}/skills"
 OPENCODE_DIR="${HOME}/.config/opencode"
@@ -67,7 +84,11 @@ Will modify (with backup):
 
 EOF
 
-confirm "Proceed?" || { say "aborted"; exit 0; }
+if [[ "$ASSUME_YES" == "1" ]]; then
+  ok "auto-confirmed via --yes"
+else
+  confirm "Proceed?" || { say "aborted"; exit 0; }
+fi
 
 # ----------------------------------------------------------------------------
 # 1. Symlink agent personas

@@ -140,10 +140,10 @@ Only Hermes native resume still needs a live smoke. opencode and cmd followups a
 
 The dashboard already has a "+ Spawn" form that POSTs to `/api/tasks`. Improvements:
 
-- **Dropdown for agent/persona/model** populated from disk (`~/.codex/agents/*.toml` etc.) — currently the persona is a free-text input.
+- ✅ **Dropdown for agent/persona** populated from disk (`opencode/agents/*.md`, `commandcode/agents/*.md`, `codex/agents/*.toml`) via the new `GET /api/personas` endpoint. **Done 2026-05-07.**
 - **Server-Sent Events for the new task's log** auto-opening when you submit, so you watch it in real time without an extra click. **Done 2026-05-06.**
 - **Followup button** on a task detail dialog: prompts for new text, calls a new endpoint `POST /api/tasks/<id>/followup`. **Done 2026-05-06.**
-- **Authentication beyond Tailscale** — currently any device on the user's Tailnet can use the dashboard. Add a simple shared-token check (header or query param) for the case where the user shares their Tailnet with others.
+- ✅ **Authentication beyond Tailscale** — `ENDY_WEB_TOKEN` env enables a shared-token check on every endpoint; clients pass it via `X-Endy-Token` header or `?token=` query (so SSE and first load both work). **Done 2026-05-07.**
 
 **Files to touch:** `web/server.py`, `web/index.html`. The bash plumbing doesn't change.
 
@@ -187,10 +187,12 @@ R1 and R2 research is in `.logs/task-20260505-12{3945-66df,4000-ec37}.log`. Summ
 
 ## Polish / nice-to-haves (not blocking)
 
-- Tab completion for `endy` (zsh + bash). Sketch in `scripts/endy-completion.sh`.
-- `endy doctor` should also check whether `cmd` has a model set (`cmd status` parses) and warn if it falls back to default.
-- README has a per-CLI gotcha table; expose the same content via `endy help <agent>` (e.g. `endy help cmd` shows the cmd gotchas).
-- Currently `_endy-preview.sh` re-implements the status-classification logic. Refactor into a shared library file sourced by both `endy-watch.sh` and `_endy-preview.sh`. (Today they're in sync because we update both — easy to forget.)
+All four polish items below were landed on 2026-05-07 — left here for history:
+
+- ✅ **Tab completion for `endy`** (zsh + bash). `scripts/endy-completion.sh` covers subcommands, agents, watch ops, help topics, and common flags. `endy install` writes a marked source block into `~/.zshrc` (with `bashcompinit`) or `~/.bashrc`. `--yes` available for non-interactive installs.
+- ✅ **`endy doctor` checks the cmd model** — parses `~/.commandcode/config.json` `.model` field and warns if missing/empty.
+- ✅ **`endy help <agent>`** — slices the matching `### <agent>` block out of `README.md`. Topics: `opencode`, `cmd`, `hermes`, `claude`, `tmux`.
+- ✅ **Shared status library** — `scripts/lib/status.sh` exports `endy_log_status` and the three error regex constants; `endy-watch.sh` and `_endy-preview.sh` both source it. `web/server.py` and `check-long-task.sh` keep parallel copies.
 
 ---
 
