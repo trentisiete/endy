@@ -40,6 +40,24 @@ LOG_DIR = ENDY_ROOT / ".logs"
 SCRIPTS = ENDY_ROOT / "scripts"
 WEB_DIR = ENDY_ROOT / "web"
 
+# Optional shared-token auth. If ENDY_WEB_TOKEN is set in the environment,
+# every request must carry it via the X-Endy-Token header or ?token=<value>
+# query param. If unset, the dashboard runs unauthenticated (Tailnet-only
+# is the default deployment, which is its own perimeter).
+ENDY_WEB_TOKEN = os.environ.get("ENDY_WEB_TOKEN", "").strip()
+
+# Persona / agent-config sources. We read directly from the endy repo so the
+# dashboard reflects the same files that `endy install` symlinks into the
+# agent runtime dirs.
+PERSONA_SOURCES = {
+    "opencode": (ENDY_ROOT / "opencode" / "agents", "*.md"),
+    "cmd":      (ENDY_ROOT / "commandcode" / "agents", "*.md"),
+    "codex":    (ENDY_ROOT / "codex" / "agents", "*.toml"),
+    # hermes uses skills, not personas — leave empty
+    "hermes":   (None, None),
+    "claude":   (None, None),
+}
+
 ANSI_RE = re.compile(
     r"\x1b\][^\x07]*(?:\x07|\x1b\\)"
     r"|\x1bP.*?\x1b\\"
@@ -411,6 +429,24 @@ def stream_events(handler):
         return
 
 
+def list_personas(agent: str) -> list:
+    """Return persona names for an agent, sorted, README excluded."""
+    src, glob = PERSONA_SOURCES.get(agent, (None, None))
+    if not src or not src.is_dir():
+        return []
+    out = []
+    for p in src.glob(glob):
+        name = p.stem
+        if name.lower() == "readme":
+            continue
+        out.append(name)
+    return sorted(out)
+
+
+def all_personas() -> dict:
+    return {agent: list_personas(agent) for agent in PERSONA_SOURCES}
+
+
 def send_json(handler, code: int, data):
     body = json.dumps(data).encode()
     handler.send_response(code)
@@ -449,14 +485,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
 
+    def _check_auth(self, url) -> bool:
+        """If a shared token is configured, every request must carry it."""
+        if not ENDY_WEB_TOKEN:
+            return True
+        # Header (preferred for SPA fetches)
+        header_tok = self.headers.get("X-Endy-Token", "").strip()
+        if header_tok and header_tok == ENDY_WEB_TOKEN:
+            return True
+        # Query param (needed for first page load and EventSource)
+        qs = parse_qs(url.query or "")
+        qtok = (qs.get("token") or [""])[0]
+        if qtok and qtok == ENDY_WEB_TOKEN:
+            return True
+        return False
+
     def _route(self, method: str):
         url = urlparse(self.path)
         path = url.path
+
+        if not self._check_auth(url):
+            # Browsers asking for "/" should see a tiny login form, not raw JSON.
+            if method == "GET" and path == "/":
+                return send_text(
+                    self, 401,
+                    "<!doctype html><meta charset=utf-8><title>endy — token required</title>"
+                    "<style>body{background:#0c0e12;color:#e7e9ee;font:14px -apple-system,system-ui,sans-serif;"
+                    "max-width:420px;margin:18vh auto;padding:24px;text-align:center}"
+                    "input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a2f3d;"
+                    "background:#15181f;color:#e7e9ee}button{background:#6ee7b7;color:#0c0e12;font-weight:600;cursor:pointer;margin-left:6px}</style>"
+                    "<h2>endy</h2><p style='color:#8d92a0'>shared token required</p>"
+                    "<form onsubmit=\"event.preventDefault();var t=this.token.value.trim();if(t)location='/?token='+encodeURIComponent(t)\">"
+                    "<input name=token autofocus placeholder='token' style='width:240px'>"
+                    "<button>open</button></form>",
+                    "text/html; charset=utf-8")
+            return send_json(self, 401, {"error": "auth required (set X-Endy-Token header or ?token= query)"})
 
         # Static frontend
         if method == "GET" and path == "/":
             html = (WEB_DIR / "index.html").read_text()
             return send_text(self, 200, html, "text/html; charset=utf-8")
+
+        # Personas dropdown population
+        if method == "GET" and path == "/api/personas":
+            qs = parse_qs(url.query or "")
+            agent = (qs.get("agent") or [""])[0]
+            if agent:
+                return send_json(self, 200, {"agent": agent, "personas": list_personas(agent)})
+            return send_json(self, 200, all_personas())
+
+        # Whether the dashboard needs to send a token on subsequent requests.
+        if method == "GET" and path == "/api/whoami":
+            return send_json(self, 200, {"auth_required": bool(ENDY_WEB_TOKEN)})
 
         # Tasks list
         if method == "GET" and path == "/api/tasks":

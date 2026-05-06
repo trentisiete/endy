@@ -49,6 +49,9 @@
 #                                     reach it via Tailscale, no public exposure).
 #   endy web --localhost              Bind to 127.0.0.1 only.
 #   endy web --host <ip> --port <n>   Custom bind. Default port: 9120.
+#                                     For shared-token auth, set ENDY_WEB_TOKEN
+#                                     in the environment; clients pass it via
+#                                     X-Endy-Token header or ?token= query.
 #
 # Help
 #   endy help [<topic>]               This text or, with a topic, more detail.
