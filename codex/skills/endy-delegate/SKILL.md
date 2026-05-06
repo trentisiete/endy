@@ -21,6 +21,26 @@ Hand off a coding task to an endy subagent. Two delivery modes: **short** (block
 
 If two backends could plausibly handle a task: prefer `opencode` (cheapest, fastest) for narrow mechanical jobs, `hermes` when the task is broader / more open-ended / needs heavy tool use, `cmd` for taste.
 
+## Model routing
+
+The user's standing model preferences (full inventory in `.logs/diag-models.md`):
+
+| Scenario | Agent + model | How to select |
+|---|---|---|
+| Default implementation work | **cmd + Kimi K2.6** | Already the persisted default in `~/.commandcode/config.json` |
+| Massive context (full repo ingestion, long traces) | **cmd + DeepSeek V4 Pro** (1M ctx, hybrid attention) | Switch interactively: `cmd` → `/model` → arrow to DeepSeek V4 Pro → Enter. Persists. |
+| Fast cheap edits | cmd + Step 3.5 Flash or DeepSeek V4 Flash | `/model` |
+| Architecture / planning | cmd + GLM-5 | `/model` |
+| Autonomous multi-step coding | cmd + GLM-5.1 | `/model` |
+| Mechanical refactor / test-writing / multi-fetch research | **opencode + big-pickle** (default) | No flag — it's the default `build` agent |
+| Free-tier exploration | opencode + minimax-m2.5-free | `--model opencode/minimax-m2.5-free` |
+
+Notes:
+- **cmd has no `--model` CLI flag.** Switching is slash-command-only and persists in `~/.commandcode/config.json`. Spawned cmd tasks inherit whatever the user last selected.
+- For long-context cmd work, set `/model` to DeepSeek V4 Pro **before** dispatching the spawn — the spawn itself can't change it.
+- When cmd hits its turn budget producing empty output (a known failure mode of Kimi K2.6 on multi-fetch research, see `feedback_cmd_kimi_limits.md` in user memory), switch to opencode rather than retrying cmd. `big-pickle` finishes the same work in fewer turns.
+- Claude models (claude-opus-4-7 etc.) require the `anthropic` provider auth path in cmd, NOT the default `command-code` provider. Don't try to select them from the standard `/model` list.
+
 ## Short tasks (≤ ~5 min, you'll wait)
 
 Call the CLI directly via your bash tool. The argv shape:
