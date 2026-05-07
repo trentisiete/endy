@@ -283,7 +283,7 @@ By default `endy spawn` adds `--full-auto`, which translates per agent to:
 | hermes | `--yolo` |
 | claude | `--dangerously-skip-permissions` |
 
-Pass `--supervised` to `endy spawn` if you want approval prompts (useful when the task touches dirs outside your control).
+Pass `--supervised` to `endy spawn` if you want approval prompts. Use it for context, slash-command, or read-only diagnostic tests where the agent should not get blanket filesystem approval.
 
 ### `--max-turns N` (cmd and hermes only)
 
@@ -344,7 +344,7 @@ endy watch kill-all --orch <name>     close all task/chat/follow windows for an 
 | `DONE` | `ENDY_EXIT=0`; no error patterns in the log |
 | `DONE-ERR` | `ENDY_EXIT=0` but the log contains `Error:` / `Exception:` / `Reached maximum turns` / `auto-rejecting` etc. — agent reported a problem despite exit 0 |
 | `FAIL(<n>)` | non-zero `ENDY_EXIT=` |
-| `ABANDONED` | no `ENDY_EXIT=` AND the tmux window is gone (task died silently) |
+| `ABANDONED` | no `ENDY_EXIT=` AND the tmux window is gone or its pane is dead (task died silently) |
 
 ### Tmux commands you'll actually use
 
@@ -569,6 +569,7 @@ These are the integration quirks we found the hard way. They're all worked aroun
 
 ### opencode
 
+- **Headless `opencode run` needs `--dir <cwd>`.** Opening the tmux window with `-c <cwd>` is not enough for all opencode tools; without `--dir`, glob/search can drift into the user's home directory and hit `~/Library` permission/interruption errors. `endy spawn opencode` and `endy ask opencode` pass `--dir` automatically.
 - **`--agent <name>` requires `mode: primary` or `mode: all`** in the persona's frontmatter. `mode: subagent` causes opencode to fall back to the default agent silently (with a warning to stderr). All endy-shipped opencode personas use `mode: all`.
 - **Persona files must declare `permission:` grants** in the frontmatter, e.g. `permission: { edit: allow, write: allow, bash: allow, webfetch: ask }`. Without these, opencode auto-rejects `external_directory` access and the task fails with `Error: The user rejected permission to use this specific tool call.`.
 - **Default format does not emit `session_id` to stdout.** It's stored in SQLite at `~/.local/share/opencode/opencode.db` (table `session`, keyed by `directory`). `endy watch followup` queries this DB to harvest the latest session for the parent task's cwd.
@@ -614,7 +615,7 @@ Currently **not in the active stack** — slot reserved. The `claude` agent type
 | `endy watch browse` errors `unknown action: reload-preview` | fzf binding bug — already fixed in current code (was `reload-preview`, should be `refresh-preview`). Pull latest. |
 | Task stuck in `PENDING` forever | The agent's CLI is hung before producing output. Check it manually: `tmux attach -t endy` then navigate to its window with `Ctrl-b w`. Often: missing auth (`cmd login`, `opencode auth login`). |
 | Task shows `DONE-ERR` | Look at `endy watch view <id>` and grep for `Error:` / `Warning: Reached maximum` etc. The heuristic flagged a problem despite exit 0. Common causes: max-turns hit, auth issue, model mismatch. |
-| Task shows `ABANDONED` | tmux window for it is gone, no `ENDY_EXIT=` marker. Likely the tmux session was killed mid-run, or the agent crashed and tmux closed the window before `remain-on-exit` could take effect. The log up to that point is preserved. |
+| Task shows `ABANDONED` | tmux window for it is gone or its pane is dead, with no `ENDY_EXIT=` marker. Likely the tmux session was killed mid-run, the agent auto-updated/restarted outside the wrapper, or the agent crashed before `ENDY_EXIT` could be written. The log up to that point is preserved. |
 | `endy watch attach -r` won't let you switch windows | Read-only mode blocks ALL keys including `Ctrl-b`. Drop `-r` (the default in `endy watch attach`) or use `--strict` only when you really mean it. |
 | Web dashboard says "no tasks" but `endy watch list` shows them | Check the web server's logs. Most likely it bound to a different `LOG_DIR` (the script auto-resolves via `__file__`'s parent). |
 | `endy spawn cmd --model X` ignored | cmd has no `--model` flag. Set globally: `cmd /model X`. |

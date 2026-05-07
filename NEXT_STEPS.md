@@ -76,6 +76,21 @@ Only Hermes native resume still needs a live smoke. opencode and cmd followups a
 
 ## Recent verification notes
 
+### OpenCode context and slash usage
+
+**Done 2026-05-07.** Files: `bin/endy`, `scripts/spawn-long-task.sh`, `README.md`.
+
+**Verified:**
+
+- opencode context-read task `20260507-171616-c537` confirmed it can read `AGENTS.md`, `README.md`, `NEXT_STEPS.md`, and symlinked opencode personas.
+- That task exposed a real integration bug: `opencode run` could search from too broad a directory and hit `~/Library` errors unless `--dir <cwd>` is passed explicitly.
+- Fix applied: `endy spawn opencode` now builds `opencode run --dir "$cwd" ...`; `endy ask opencode` passes `--dir "$(pwd)"`.
+- cmd triage task `20260507-171641-c06f` exposed two follow-up fixes: status detection now treats dead tmux panes with no `ENDY_EXIT` as `ABANDONED`, and `spawn-chat.sh` no longer silently passes unsupported initial messages into interactive cmd.
+- Interactive opencode chat `20260507-171623-1844` confirmed the TUI shows `Build · Big Pickle`. `Ctrl-p` opens the command menu; filtering `context` shows `Disable file context`. Direct `/context` did not open a context report and instead triggered TUI picker behavior, so slash/context tests should use `tmux send-keys` + `tmux capture-pane` with confirmation captures.
+- Safety recommendation from cmd task `20260507-173516-0049`: context/slash/read-only diagnostics should be launched with `endy spawn --supervised` so opencode does not receive blanket `--dangerously-skip-permissions`. Flipping `endy spawn` away from full-auto-by-default remains a product decision because it changes unattended worker behavior.
+
+**Model routing from this pass:** use opencode `big-pickle` for context smoke tests and mechanical multi-file verification; use cmd/Kimi K2.6 for targeted bug/UX triage; switch cmd manually to DeepSeek V4 Pro before dispatching only when the task is truly massive-context.
+
 ### Multi-orchestrator attribution with live subagents
 
 **Done 2026-05-06.** Files: `bin/endy`, `scripts/spawn-long-task.sh`, `scripts/spawn-chat.sh`, `scripts/endy-watch.sh`, `web/server.py`.

@@ -103,7 +103,7 @@ def meta_prompt_path(tid: str, meta_data: dict) -> Path:
     return Path(raw) if raw else LOG_DIR / f"task-{tid}.prompt.md"
 
 
-def tmux_window_exists(meta_data: dict) -> bool:
+def tmux_window_alive(meta_data: dict) -> bool:
     window = meta_data.get("window") or ""
     if not window:
         return False
@@ -113,7 +113,7 @@ def tmux_window_exists(meta_data: dict) -> bool:
         session, window_name = "endy", window
     try:
         res = subprocess.run(
-            ["tmux", "list-windows", "-t", session, "-F", "#W"],
+            ["tmux", "display-message", "-p", "-t", f"{session}:{window_name}.0", "#{pane_dead}"],
             capture_output=True,
             text=True,
             timeout=1,
@@ -122,12 +122,12 @@ def tmux_window_exists(meta_data: dict) -> bool:
         return False
     if res.returncode != 0:
         return False
-    return window_name in set(res.stdout.splitlines())
+    return res.stdout.strip() != "1"
 
 
 def task_status(log_path: Path, meta_data: dict | None = None) -> str:
     kind = (meta_data or {}).get("kind", "spawn")
-    window_exists = tmux_window_exists(meta_data or {})
+    window_exists = tmux_window_alive(meta_data or {})
     if not log_path.exists():
         if meta_data and not window_exists:
             return "ABANDONED"

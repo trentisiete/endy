@@ -40,6 +40,7 @@ origin_window=""
 full_auto=0
 select_window=1
 initial_message=""
+initial_message_note=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,7 +108,10 @@ case "$agent" in
       echo "info: cmd has no --model flag; '$explicit_model' recorded for metadata only. Use 'cmd model' interactively to set it." >&2
     [[ -n "$persona" ]] && \
       echo "warning: cmd has no --agent flag; '$persona' ignored. Personas only via /agents interactively." >&2
-    [[ -n "$initial_message" ]] && cmd_argv+=("$initial_message")
+    if [[ -n "$initial_message" ]]; then
+      initial_message_note="cmd interactive mode does not support initial messages; use endy watch followup for structured context injection."
+      echo "warning: ${initial_message_note}" >&2
+    fi
     ;;
   claude)
     cmd_argv=(claude)
@@ -139,6 +143,7 @@ model=${model}
 cwd=${cwd}
 parent_task=${parent_task}
 resume_id=${resume_id}
+initial_message_note=${initial_message_note}
 orchestrator=${orchestrator}
 orchestrator_agent=${orchestrator_agent}
 origin_session=${origin_session}
@@ -179,6 +184,7 @@ prompt=${PROMPT_PATH}
 spawned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 parent_task=${parent_task}
 resume_id=${resume_id}
+initial_message_note=${initial_message_note}
 EOF
 
 quoted_log_path="$(printf '%q' "$LOG_PATH")"

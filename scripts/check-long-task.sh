@@ -29,6 +29,14 @@ meta_field() {
   grep "^${field}=" "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true
 }
 
+tmux_window_alive() {
+  local window="$1"
+  [[ -n "$window" ]] || return 1
+  local pane_dead
+  pane_dead="$(tmux display-message -p -t "${window}.0" '#{pane_dead}' 2>/dev/null || true)"
+  [[ -n "$pane_dead" && "$pane_dead" != "1" ]]
+}
+
 if [[ "${1:-}" == "--list" ]]; then
   shopt -s nullglob
   for m in "${LOG_DIR}"/task-*.meta; do
@@ -39,7 +47,11 @@ if [[ "${1:-}" == "--list" ]]; then
     log="$(meta_field "$m" log)"; log="${log:-${LOG_DIR}/task-${id}.log}"
     window="$(meta_field "$m" window)"
     if [[ ! -f "$log" ]]; then
-      st="$([[ "$kind" == "chat" ]] && echo CHAT || echo PENDING)"
+      if [[ -n "$window" ]] && ! tmux_window_alive "$window"; then
+        st="ABANDONED"
+      else
+        st="$([[ "$kind" == "chat" ]] && echo CHAT || echo PENDING)"
+      fi
     elif grep -qE '^ENDY_EXIT=[0-9]+' "$log" 2>/dev/null; then
       ec="$(grep -E '^ENDY_EXIT=[0-9]+' "$log" | tail -1 | cut -d= -f2)"
       if [[ "$ec" == "0" ]]; then
@@ -51,7 +63,7 @@ if [[ "${1:-}" == "--list" ]]; then
       else
         st="FAILED($ec)"
       fi
-    elif [[ -n "$window" ]] && ! tmux list-windows -t "${window%%:*}" 2>/dev/null | grep -q "^[0-9]*: ${window##*:}"; then
+    elif [[ -n "$window" ]] && ! tmux_window_alive "$window"; then
       st="ABANDONED"
     elif [[ "$kind" == "chat" ]]; then
       st="CHAT"
@@ -104,8 +116,8 @@ if grep -qE '^ENDY_EXIT=[0-9]+' "$LOG" 2>/dev/null; then
   else
     echo "FAILED  exit=${ec}  log=${LOG}"
   fi
-elif [[ -n "$window" ]] && ! tmux list-windows -t "${window%%:*}" 2>/dev/null | grep -q "^[0-9]*: ${window##*:}"; then
-  echo "ABANDONED  tmux window ${window} no longer exists, no exit code recorded  log=${LOG}"
+elif [[ -n "$window" ]] && ! tmux_window_alive "$window"; then
+  echo "ABANDONED  tmux window ${window} is gone or pane is dead, no exit code recorded  log=${LOG}"
 elif [[ "$KIND" == "chat" ]]; then
   echo "CHAT  log=${LOG}"
 else
