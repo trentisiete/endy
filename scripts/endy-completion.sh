@@ -28,7 +28,7 @@ _endy_complete() {
               codex opencode cmd commandcode hermes claude"
 
   local agents="codex opencode cmd hermes claude"
-  local watch_subs="list tree dir log chat attach panel browse follow view followup kill kill-all gc"
+  local watch_subs="list tree dir log chat attach panel browse follow view followup kill kill-all gc purge delete purge-session"
   local help_topics="opencode cmd hermes claude tmux"
   local web_opts="--localhost --host --port --token"
   local spawn_opts="--full-auto --supervised --persona --model --cwd --max-turns --orchestrator --orchestrator-agent --parent-task --resume --skills --"
@@ -72,7 +72,7 @@ _endy_complete() {
         dir)
           COMPREPLY=( $(compgen -d -- "$cur") )
           ;;
-        log|view|follow|chat|attach|kill|followup)
+        log|view|follow|chat|attach|kill|followup|purge|delete|purge-session)
           # Task ID — list from .logs
           local ids
           local logs_dir="${ENDY_LOGS_DIR:-$HOME/Downloads/endy/.logs}"

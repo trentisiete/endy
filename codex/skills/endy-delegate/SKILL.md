@@ -244,10 +244,10 @@ After confirmation, the picker closes (the pane goes mostly empty, a normal post
 
 `endy watch browse` is an fzf picker over rows. Two kinds of rows show up:
 
-- **spawn-kind** (`kind=spawn` in `.meta`) — a long-running headless task. Pressing Enter opens a *new* chat window in the background (browse stays focused), so you can fan out without losing the picker.
-- **chat-kind** (`kind=chat`) — an already-running interactive chat window. Pressing Enter focuses that window (browse persists in the background, prefix-l back).
+- **spawn-kind** (`kind=spawn` in `.meta`) — a long-running headless task. Pressing Enter opens a *new* chat window in the foreground and exits the picker. Use ^O when you want browse to stay focused.
+- **chat-kind** (`kind=chat`) — an already-running interactive chat window. Pressing Enter focuses that window and exits the picker.
 
-The Enter binding routes through `endy-watch.sh _open <id>` which dispatches by kind. ^O always opens in background; ^G always opens in foreground and exits the picker.
+The Enter binding routes through `endy-watch.sh chat <id>` in foreground mode. ^O always opens in background; ^G is a foreground alias.
 
 ### Gotcha: cmd headless tasks don't have native resume
 

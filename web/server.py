@@ -111,6 +111,22 @@ def tmux_window_alive(meta_data: dict) -> bool:
         session, window_name = window.split(":", 1)
     else:
         session, window_name = "endy", window
+    window_name = window_name.split(".", 1)[0]
+    # Exact window-name check first — tmux display-message can resolve a
+    # missing window to another live window, giving false positives.
+    try:
+        list_res = subprocess.run(
+            ["tmux", "list-windows", "-t", session, "-F", "#{window_name}"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    if list_res.returncode != 0:
+        return False
+    if window_name not in list_res.stdout.splitlines():
+        return False
     try:
         res = subprocess.run(
             ["tmux", "display-message", "-p", "-t", f"{session}:{window_name}.0", "#{pane_dead}"],

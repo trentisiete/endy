@@ -32,8 +32,19 @@ meta_field() {
 tmux_window_alive() {
   local window="$1"
   [[ -n "$window" ]] || return 1
+  local session="endy"
+  local window_name="$window"
+  if [[ "$window" == *:* ]]; then
+    session="${window%%:*}"
+    window_name="${window#*:}"
+  fi
+  window_name="${window_name%%.*}"
+  # Exact window-name check first: tmux display-message can resolve a
+  # missing window to another live window, giving false positives.
+  tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null \
+    | grep -Fx -- "$window_name" >/dev/null || return 1
   local pane_dead
-  pane_dead="$(tmux display-message -p -t "${window}.0" '#{pane_dead}' 2>/dev/null || true)"
+  pane_dead="$(tmux display-message -p -t "${session}:${window_name}.0" '#{pane_dead}' 2>/dev/null || true)"
   [[ -n "$pane_dead" && "$pane_dead" != "1" ]]
 }
 

@@ -29,9 +29,14 @@ endy_log_status() {
   local expected_window="task-${task_id}"
   [[ "$kind" == "chat" ]] && expected_window="chat-${task_id}"
   if [[ -n "$task_id" ]]; then
-    local pane_dead
-    pane_dead="$(tmux display-message -p -t "${session}:${expected_window}.0" '#{pane_dead}' 2>/dev/null || true)"
-    [[ -n "$pane_dead" && "$pane_dead" != "1" ]] && alive_in_tmux=1
+    # Exact window-name check first: tmux display-message can resolve a
+    # missing window to another live window, giving false positives.
+    if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null \
+         | grep -Fx -- "$expected_window" >/dev/null; then
+      local pane_dead
+      pane_dead="$(tmux display-message -p -t "${session}:${expected_window}.0" '#{pane_dead}' 2>/dev/null || true)"
+      [[ -n "$pane_dead" && "$pane_dead" != "1" ]] && alive_in_tmux=1
+    fi
   fi
 
   if [[ ! -f "$log" ]]; then

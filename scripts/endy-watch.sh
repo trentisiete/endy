@@ -30,17 +30,15 @@
 #                                 either being interrupted. Switch with Ctrl-b N.
 #   endy-watch chat <id>          Open an interactive chat window for that task's
 #                                 agent/cwd. opencode/hermes resume natively when
-#                                 a session id can be found; cmd opens fresh.
+#                                 a session id can be found; cmd injects context
+#                                 for headless spawn tasks.
 #   endy-watch browse [--all] [--cwd <dir>] [--orch <name>]
 #                                 Interactive picker. Uses fzf if installed
 #                                 (live preview in side pane); falls back to
-#                                 the table otherwise. Enter is smart:
-#                                 spawn-kind rows open a new chat in the
-#                                 background (browse stays focused);
-#                                 chat-kind rows focus the existing window
-#                                 (browse stays alive in tmux — prefix-l back).
+#                                 the table otherwise. Enter opens/focuses chat
+#                                 in foreground and exits the picker.
 #                                 ^O always opens chat in background.
-#                                 ^G opens chat in foreground and exits.
+#                                 ^G is an explicit foreground alias.
 #   endy-watch panel [--all]      Tile view of running task logs. Warns if >4
 #                                 (suggest 'browse' or 'follow' instead).
 #   endy-watch followup <id> [-- <new-prompt>]
@@ -58,6 +56,11 @@
 #   endy-watch kill-all --agent <name> | --cwd <dir> | --orch <name> | --everything | --done
 #                                 Close every matching task/chat/follow window.
 #                                 --done limits scope to finished/failed/abandoned tasks.
+#   endy-watch purge <id> [--dry-run]
+#                                 Purge one task and all its descendants from
+#                                 .logs/ and kill their tmux windows. Double
+#                                 confirmation required (type '&', then the full
+#                                 task id). Aliases: delete, purge-session.
 #   endy-watch help               This text.
 
 set -u
@@ -268,11 +271,29 @@ exec tail -F ${quoted_log}
 
 focus_window() {
   local window="$1"
-  tmux select-window -t "$window" 2>/dev/null || true
+  tmux_window_alive "$window" || { echo "tmux window missing: $window" >&2; return 1; }
+  tmux select-window -t "$window" 2>/dev/null || return 1
   if [[ -n "${TMUX:-}" ]]; then
     exec tmux switch-client -t "$window"
   fi
   exec tmux attach -t "$window"
+}
+
+tmux_window_alive() {
+  local window="$1"
+  [[ -n "$window" ]] || return 1
+  local session="$SESSION"
+  local window_name="$window"
+  if [[ "$window" == *:* ]]; then
+    session="${window%%:*}"
+    window_name="${window#*:}"
+  fi
+  window_name="${window_name%%.*}"
+  tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null \
+    | grep -Fx -- "$window_name" >/dev/null || return 1
+  local pane_dead
+  pane_dead="$(tmux display-message -p -t "${session}:${window_name}.0" '#{pane_dead}' 2>/dev/null || true)"
+  [[ -n "$pane_dead" && "$pane_dead" != "1" ]]
 }
 
 resume_id_for_task() {
@@ -715,21 +736,22 @@ cmd_browse() {
   # Build the bind list. ctrl-y copies the id to the system clipboard so the
   # user never has to wrestle with terminal selection.
   local binds=(
-    "--bind=enter:execute-silent(${BASH_SOURCE[0]} _open {1})+refresh-preview"
+    "--bind=enter:execute(${BASH_SOURCE[0]} chat {1})+abort"
     "--bind=ctrl-g:execute(${BASH_SOURCE[0]} chat {1})+abort"
     "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {1})"
     "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {1})"
     "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {1})+abort"
     "--bind=ctrl-o:execute-silent(${BASH_SOURCE[0]} chat {1} --no-attach)+refresh-preview"
     "--bind=ctrl-k:execute(${BASH_SOURCE[0]} kill {1})"
+    "--bind=ctrl-d:execute(${BASH_SOURCE[0]} purge {1} --from-picker)+abort"
     "--bind=ctrl-r:refresh-preview"
   )
   local header
   if [[ -n "$copy_cmd" ]]; then
     binds+=("--bind=ctrl-y:execute-silent(printf %s {1} | ${copy_cmd})+abort")
-    header="enter→smart (chat=focus, spawn=bg open)  ^O chat bg  ^G chat fg+exit  ^F follow  ^V view  ^L log  ^Y copy id  ^K kill  ^R refresh  esc cancel"
+    header="enter→chat fg+exit  Ctrl-O chat bg  Ctrl-G chat fg+exit  Ctrl-F follow  Ctrl-V view  Ctrl-L log  Ctrl-Y copy id  Ctrl-K kill  Ctrl-D purge  Ctrl-R refresh  esc cancel"
   else
-    header="enter→smart (chat=focus, spawn=bg open)  ^O chat bg  ^G chat fg+exit  ^F follow  ^V view  ^L log  ^K kill  ^R refresh  esc cancel  (install pbcopy/xclip for ^Y copy)"
+    header="enter→chat fg+exit  Ctrl-O chat bg  Ctrl-G chat fg+exit  Ctrl-F follow  Ctrl-V view  Ctrl-L log  Ctrl-K kill  Ctrl-D purge  Ctrl-R refresh  esc cancel  (install pbcopy/xclip for Ctrl-Y copy)"
   fi
 
   local picked
@@ -841,27 +863,17 @@ cmd_attach() {
 }
 
 # ---------------------------------------------------------------------------
-# open — fzf-Enter dispatcher: chat-kind → focus existing window;
-#         spawn-kind → open a new background chat. Keeps browse alive.
+# open — smart dispatcher used by picker bindings that should keep browse alive:
+#        chat-kind → focus existing window; spawn-kind → open/focus new chat.
 # ---------------------------------------------------------------------------
 
 cmd_open() {
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || return 0
+  prefix="$(printf '%s' "$prefix" | strip_ansi | awk '{print $1}')"
+  [[ -n "$prefix" ]] || return 0
   local id; id="$(resolve_id "$prefix" 2>/dev/null)" || return 0
-  local meta; meta="$(task_meta_path "$id")"
-  [[ -f "$meta" ]] || return 0
-  local kind; kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
-  if [[ "$kind" == "chat" ]]; then
-    local window; window="$(meta_field "$meta" window)"
-    [[ -n "$window" ]] || window="${SESSION}:chat-${id}"
-    tmux select-window -t "$window" 2>/dev/null || true
-    if [[ -n "${TMUX:-}" ]]; then
-      tmux switch-client -t "$window" 2>/dev/null || true
-    fi
-  else
-    cmd_chat "$id" --no-attach
-  fi
+  cmd_chat "$id"
 }
 
 # ---------------------------------------------------------------------------
@@ -878,6 +890,7 @@ cmd_chat() {
       *)           if [[ -z "$prefix" ]]; then prefix="$1"; fi; shift ;;
     esac
   done
+  prefix="$(printf '%s' "$prefix" | strip_ansi | awk '{print $1}')"
   [[ -n "$prefix" ]] || { echo "usage: endy watch chat <id-prefix> [--no-attach]" >&2; exit 2; }
 
   local id; id="$(resolve_id "$prefix")" || exit 1
@@ -897,6 +910,18 @@ cmd_chat() {
 
   if [[ "$kind" == "chat" ]]; then
     [[ -n "$window" ]] || window="${SESSION}:chat-${id}"
+    if ! tmux_window_alive "$window"; then
+      local parent; parent="$(meta_field "$meta" parent_task)"
+      if [[ -n "$parent" && -f "$(task_meta_path "$parent")" ]]; then
+        echo "chat window missing for $id; reopening from parent task $parent"
+        local reopen_args=("$parent")
+        [[ "$attach" == "0" ]] && reopen_args+=(--no-attach)
+        cmd_chat "${reopen_args[@]}"
+        return 0
+      fi
+      echo "chat window missing for $id: $window" >&2
+      return 1
+    fi
     echo "chat window: $window"
     echo "tmux commands:"
     echo "  tmux attach -t ${SESSION}"
@@ -1067,7 +1092,11 @@ cmd_kill() {
   [[ -n "$window" ]] || window="${SESSION}:task-${id}"
 
   echo "killing $window …"
-  tmux kill-window -t "$window" 2>/dev/null || echo "  (window already gone)"
+  if tmux_window_alive "$window"; then
+    tmux kill-window -t "$window" 2>/dev/null || echo "  (window already gone)"
+  else
+    echo "  (window already gone)"
+  fi
 
   # Append a synthetic exit marker so check-long-task.sh stops reporting RUNNING.
   if [[ -f "$log" ]] && ! grep -qE '^ENDY_EXIT=' "$log" 2>/dev/null; then
@@ -1199,6 +1228,197 @@ cmd_gc() {
 }
 
 # ---------------------------------------------------------------------------
+# purge — delete a task family from .logs/ and kill its tmux windows
+# ---------------------------------------------------------------------------
+
+cmd_purge() {
+  local prefix=""
+  local dry_run=0
+  local from_picker=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      --from-picker) from_picker=1; shift ;;
+      *)
+        if [[ -z "$prefix" ]]; then
+          prefix="$1"
+        else
+          echo "usage: endy watch purge <id-prefix> [--dry-run] [--from-picker]" >&2
+          exit 2
+        fi
+        shift ;;
+    esac
+  done
+  [[ -n "$prefix" ]] || { echo "usage: endy watch purge <id-prefix> [--dry-run] [--from-picker]" >&2; exit 2; }
+  prefix="$(printf '%s' "$prefix" | strip_ansi | awk '{print $1}')"
+  [[ -n "$prefix" ]] || { echo "no task id found after stripping ansi" >&2; exit 1; }
+
+  local root_id; root_id="$(resolve_id "$prefix")" || exit 1
+
+  # Collect root task plus all transitive descendants whose parent_task chain reaches the root.
+  local purge_set=("$root_id")
+  local changed=1
+  while [[ "$changed" == "1" ]]; do
+    changed=0
+    shopt -s nullglob
+    for m in "${LOG_DIR}"/task-*.meta; do
+      local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+      local in_set=0
+      for existing in "${purge_set[@]}"; do
+        [[ "$existing" == "$id" ]] && { in_set=1; break; }
+      done
+      [[ "$in_set" == "1" ]] && continue
+
+      local parent; parent="$(meta_field "$m" parent_task)"
+      [[ -n "$parent" ]] || continue
+
+      for existing in "${purge_set[@]}"; do
+        [[ "$existing" == "$parent" ]] && { purge_set+=("$id"); changed=1; break; }
+      done
+    done
+    shopt -u nullglob
+  done
+
+  echo "Purge plan for root: ${root_id}"
+  echo ""
+
+  local task_count=0
+  local windows_to_kill=()
+  local files_to_delete=()
+  for id in "${purge_set[@]}"; do
+    task_count=$((task_count + 1))
+    local meta; meta="$(task_meta_path "$id")"
+    local log; log="$(task_log_path "$meta" "$id")"
+    local prompt; prompt="$(task_prompt_path "$meta" "$id")"
+    local kind; kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
+    local window; window="$(meta_field "$meta" window)"
+
+    echo "  task: ${id}"
+    if [[ -n "$window" ]]; then
+      local wname; wname="${window##*:}"
+      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$wname"; then
+        echo "    tmux window: ${window}"
+        windows_to_kill+=("$window")
+      fi
+    fi
+
+    local follow_window="follow-${id}"
+    if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$follow_window"; then
+      echo "    tmux follow: ${SESSION}:${follow_window}"
+      windows_to_kill+=("${SESSION}:${follow_window}")
+    fi
+
+    if [[ "$kind" == "chat" && -z "$window" ]]; then
+      local chat_window="chat-${id}"
+      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$chat_window"; then
+        echo "    tmux chat: ${SESSION}:${chat_window}"
+        windows_to_kill+=("${SESSION}:${chat_window}")
+      fi
+    fi
+
+    if [[ -z "$window" && "$kind" != "chat" ]]; then
+      local task_window="task-${id}"
+      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$task_window"; then
+        echo "    tmux task: ${SESSION}:${task_window}"
+        windows_to_kill+=("${SESSION}:${task_window}")
+      fi
+    fi
+
+    if [[ -f "$meta" ]]; then
+      echo "    meta: ${meta}"
+      files_to_delete+=("$meta")
+    fi
+    if [[ -f "$prompt" ]]; then
+      echo "    prompt: ${prompt}"
+      files_to_delete+=("$prompt")
+    fi
+    if [[ -f "$log" ]]; then
+      echo "    log: ${log}"
+      files_to_delete+=("$log")
+    fi
+    local default_log="${LOG_DIR}/task-${id}.log"
+    [[ "$kind" == "chat" ]] && default_log="${LOG_DIR}/chat-${id}.log"
+    if [[ "$default_log" != "$log" && -f "$default_log" ]]; then
+      echo "    fallback log: ${default_log}"
+      files_to_delete+=("$default_log")
+    fi
+  done
+
+  # Deduplicate
+  local unique_windows=()
+  if [[ ${#windows_to_kill[@]} -gt 0 ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && unique_windows+=("$line")
+    done < <(printf '%s\n' "${windows_to_kill[@]}" | sort -u)
+  fi
+
+  local unique_files=()
+  if [[ ${#files_to_delete[@]} -gt 0 ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && unique_files+=("$line")
+    done < <(printf '%s\n' "${files_to_delete[@]}" | sort -u)
+  fi
+
+  # Validate files are under .logs
+  local safe_files=()
+  local skipped_files=()
+  for f in ${unique_files[@]+"${unique_files[@]}"}; do
+    if [[ "$f" == "${LOG_DIR}"/* ]]; then
+      safe_files+=("$f")
+    else
+      skipped_files+=("$f")
+    fi
+  done
+
+  if [[ ${#skipped_files[@]} -gt 0 ]]; then
+    echo ""
+    echo "WARNING: skipping files outside .logs/:"
+    for f in "${skipped_files[@]}"; do
+      echo "  $f"
+    done
+  fi
+
+  if [[ "$dry_run" == "1" ]]; then
+    echo ""
+    echo "[dry-run] no changes made"
+    exit 0
+  fi
+
+  # Confirmation: '&' arms; CLI also requires retyping the full id.
+  echo ""
+  echo "Type '&' to arm purge:"
+  read -r confirm1
+  if [[ "$confirm1" != "&" ]]; then
+    echo "aborted (first confirmation not '&')" >&2
+    exit 1
+  fi
+
+  if [[ "$from_picker" != "1" ]]; then
+    echo "Type the full root task id to purge:"
+    read -r confirm2
+    if [[ "$confirm2" != "$root_id" ]]; then
+      echo "aborted (second confirmation did not match ${root_id})" >&2
+      exit 1
+    fi
+  fi
+
+  # Execute
+  local killed_count=0
+  local deleted_count=0
+
+  for w in ${unique_windows[@]+"${unique_windows[@]}"}; do
+    tmux kill-window -t "$w" 2>/dev/null && killed_count=$((killed_count + 1))
+  done
+
+  for f in ${safe_files[@]+"${safe_files[@]}"}; do
+    rm -f "$f" && deleted_count=$((deleted_count + 1))
+  done
+
+  echo ""
+  echo "Purge complete: ${task_count} task(s), ${killed_count} window(s) killed, ${deleted_count} file(s) deleted"
+}
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
@@ -1218,11 +1438,12 @@ case "${1:-attach}" in
   kill)          shift; cmd_kill "$@" ;;
   gc)            shift; cmd_gc "$@" ;;
   kill-all|close-all) shift; cmd_kill_all "$@" ;;
+  purge|delete|purge-session) shift; cmd_purge "$@" ;;
   -h|--help|help)
-    sed -n '2,55p' "$0"
+    sed -n '2,59p' "$0"
     ;;
   *)
-    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | gc [--dry-run] | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything]" >&2
+    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | gc [--dry-run] | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything | purge <id> [--dry-run]]" >&2
     exit 2
     ;;
 esac

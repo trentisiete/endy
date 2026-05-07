@@ -42,6 +42,8 @@
 #   endy watch kill <id>              Kill a stuck task.
 #   endy watch kill-all --agent X     Close all task/chat/follow windows for an agent.
 #   endy watch kill-all --cwd DIR     Close all task/chat/follow windows under a dir.
+#   endy watch purge <id>             Purge a task family from .logs/ and kill tmux windows.
+#                                     Aliases: delete, purge-session.
 #
 # Web dashboard
 #   endy web                          Start the web dashboard. Binds to your

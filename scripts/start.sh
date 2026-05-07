@@ -62,10 +62,14 @@ open_manager_windows() {
   kill_window_if_exists watch
   tmux new-window -t "$SESSION" -n watch -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "clear
-printf '\033[1;36mendy watch browse\033[0m\n'
+printf '\033[1;36mendy watch browse --all (auto-relaunch)\033[0m\n'
 printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach\033[0m\n'
-printf '\033[1;33menter chat/switch | Ctrl-o open chat here | Ctrl-f follow | Ctrl-v view | Ctrl-l log | Ctrl-k kill | esc exit\033[0m\n\n'
-${ENDY_ROOT}/bin/endy watch browse
+printf '\033[1;33menter chat/switch | Ctrl-o chat bg | Ctrl-f follow | Ctrl-v view | Ctrl-l log | Ctrl-k kill | Ctrl-d purge | esc exit\033[0m\n\n'
+while :; do
+  ${ENDY_ROOT}/bin/endy watch browse --all
+  printf '\n\033[2mpicker exited — relaunching in 1s. Ctrl-c to drop to shell.\033[0m\n'
+  sleep 1 || break
+done
 BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 ")"
 

@@ -19,13 +19,20 @@ tmux kill-window -t "${SESSION}:help" 2>/dev/null || true
 tmux kill-window -t "${SESSION}:tree" 2>/dev/null || true
 
 tree_cmd="
+refresh_count=0
+refreshes_per_history_clear=3600  # 5 hours at one refresh every 5 seconds.
 while :; do
-  clear
+  printf '\033[H\033[2J'
   printf '\033[1;36mendy watch tree\033[0m\n'
   printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach | Ctrl-b & kill window | Ctrl-b x kill pane\033[0m\n'
   printf '\033[1;33mendy: watch browse | watch tree --all | watch dir <path> | watch chat <id> | watch kill-all --cwd <path>\033[0m\n\n'
   ${ENDY_ROOT}/bin/endy watch tree
-  printf '\n\033[2mrefreshes every 5s. Ctrl-c stops auto-refresh and leaves this shell.\033[0m\n'
+  refresh_count=\$((refresh_count + 1))
+  if [[ \"\$refresh_count\" -ge \"\$refreshes_per_history_clear\" ]]; then
+    tmux clear-history -t ${SESSION}:tree 2>/dev/null || true
+    refresh_count=0
+  fi
+  printf '\n\033[2mrefreshes every 5s; scrollback is pruned every 5h. Ctrl-c stops auto-refresh and leaves this shell.\033[0m\n'
   sleep 5
 done
 BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
