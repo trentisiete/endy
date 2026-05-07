@@ -295,7 +295,7 @@ Both `cmd` and `hermes` have an internal turn budget for tool-using chains. **De
 
 ## The `endy watch` family
 
-Most commands are observational. Mutating commands are `chat`, `followup`, `kill`, and `kill-all`.
+Most commands are observational. Mutating commands are `chat`, `followup`, `kill`, `kill-all`, and `purge`.
 
 ```
 endy watch                            attach to 'endy' tmux session (read-write)
@@ -330,6 +330,10 @@ endy watch kill <id>                  kill a stuck task (closes tmux window AND
 endy watch kill-all --agent <name>    close all task/chat/follow windows for an agent
 endy watch kill-all --cwd <dir>       close all task/chat/follow windows under a dir
 endy watch kill-all --orch <name>     close all task/chat/follow windows for an orchestrator
+endy watch purge <id> [--dry-run]     delete a task and all descendants from .logs/
+                                      and kill their tmux windows. double confirmation
+                                      required (type '&', then the full task id).
+                                      aliases: delete, purge-session.
 ```
 
 `<id>` everywhere accepts a unique prefix — `endy watch log 4b3c` is enough if no other task starts with `4b3c`.
@@ -407,7 +411,7 @@ Or directly:
 endy watch chat 4b3c
 ```
 
-For `opencode` and `hermes`, endy tries to resume the task's native session before opening the interactive terminal. For `cmd`, there is no reliable headless interactive resume, so endy opens CommandCode in the same working directory and links the new chat back to the parent task.
+For `opencode` and `hermes`, endy tries to resume the task's native session before opening the interactive terminal. For `cmd`, headless `cmd -p` runs do not persist a native interactive session, so endy opens CommandCode in the same working directory with the parent prompt and log tail injected as the initial message.
 
 ### Manager Workflows
 
@@ -452,6 +456,7 @@ What the manager can do today:
 | Stop one stuck task | `endy watch kill <id>` |
 | Stop all work for a repo | `endy watch kill-all --cwd ~/work/payments` |
 | Stop all work for an orchestrator | `endy watch kill-all --orch mobile` |
+| Purge a task and its descendants | `endy watch purge <id>` |
 | Stop endy completely | `tmux kill-session -t endy` or `endy stop` |
 
 ---

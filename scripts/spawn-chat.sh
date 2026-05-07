@@ -10,6 +10,7 @@
 #                 [--parent-task <task-id>]
 #                 [--orchestrator <name>]
 #                 [--orchestrator-agent <agent>]
+#                 [--initial-message <message>]
 #                 [--full-auto]
 #                 [--no-select]
 #
@@ -56,7 +57,7 @@ while [[ $# -gt 0 ]]; do
     --no-select)    select_window=0;   shift   ;;
     --initial-message) initial_message="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,19p' "$0"; exit 0 ;;
+      sed -n '2,21p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -109,8 +110,8 @@ case "$agent" in
     [[ -n "$persona" ]] && \
       echo "warning: cmd has no --agent flag; '$persona' ignored. Personas only via /agents interactively." >&2
     if [[ -n "$initial_message" ]]; then
-      initial_message_note="cmd interactive mode does not support initial messages; use endy watch followup for structured context injection."
-      echo "warning: ${initial_message_note}" >&2
+      initial_message_note="sent as cmd initial prompt"
+      cmd_argv+=("$initial_message")
     fi
     ;;
   claude)
@@ -133,6 +134,7 @@ quoted_argv=""
 for a in "${cmd_argv[@]}"; do
   quoted_argv+=" $(printf '%q' "$a")"
 done
+quoted_argv_display="$(printf '%q' "$quoted_argv")"
 
 cat > "$PROMPT_PATH" <<EOF
 Interactive endy chat session.
@@ -196,7 +198,7 @@ clear
 printf '\033[1;36mendy chat: %s\033[0m\n' '${agent}'
 printf '\033[1;33mtmux: attach=%s | select=%s | picker=Ctrl-b w | detach=Ctrl-b d\033[0m\n' '${SESSION}' '${SESSION}:${WINDOW_NAME}'
 printf '\033[1;33mendy: view=%s | follow=%s | chat=%s | followup=%s | kill=%s\033[0m\n\n' 'endy watch view ${TASK_ID}' 'endy watch follow ${TASK_ID}' 'endy watch chat ${TASK_ID}' 'endy watch followup ${TASK_ID} -- \"<next prompt>\"' 'endy watch kill ${TASK_ID}'
-printf 'Starting:%s\n\n' '${quoted_argv}'
+printf 'Starting:%s\n\n' ${quoted_argv_display}
 exec ${quoted_argv}
 "
 inner_cmd="bash -lc $(printf '%q' "$inner_script")"
