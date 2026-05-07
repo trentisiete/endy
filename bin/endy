@@ -368,7 +368,7 @@ cmd_ask() {
     codex)
       exec codex exec ${extra[@]+"${extra[@]}"} "$prompt" ;;
     opencode)
-      exec opencode run ${extra[@]+"${extra[@]}"} "$prompt" ;;
+      exec opencode run --dir "$(pwd)" ${extra[@]+"${extra[@]}"} "$prompt" ;;
     cmd|commandcode)
       exec cmd --skip-onboarding --trust ${extra[@]+"${extra[@]}"} -p "$prompt" ;;
     hermes)

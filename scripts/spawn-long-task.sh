@@ -112,7 +112,7 @@ fi
 # Build agent argv (everything EXCEPT the final prompt argument).
 case "$agent" in
   opencode)
-    cmd_argv=(opencode run)
+    cmd_argv=(opencode run --dir "$cwd")
     [[ -n "$resume_id" ]] && cmd_argv+=(--session "$resume_id")
     [[ -n "$persona" ]] && cmd_argv+=(--agent "$persona")
     [[ -n "$model"   ]] && cmd_argv+=(--model "$model")

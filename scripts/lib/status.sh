@@ -25,17 +25,17 @@ endy_log_status() {
   local kind="${3:-spawn}"
   local session="${4:-${SESSION:-endy}}"
 
-  local exists_in_tmux=0
+  local alive_in_tmux=0
   local expected_window="task-${task_id}"
   [[ "$kind" == "chat" ]] && expected_window="chat-${task_id}"
-  if [[ -n "$task_id" ]] \
-     && tmux list-windows -t "$session" -F '#W' 2>/dev/null \
-        | grep -qx "$expected_window"; then
-    exists_in_tmux=1
+  if [[ -n "$task_id" ]]; then
+    local pane_dead
+    pane_dead="$(tmux display-message -p -t "${session}:${expected_window}.0" '#{pane_dead}' 2>/dev/null || true)"
+    [[ -n "$pane_dead" && "$pane_dead" != "1" ]] && alive_in_tmux=1
   fi
 
   if [[ ! -f "$log" ]]; then
-    if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
+    if [[ -n "$task_id" && "$alive_in_tmux" == "0" ]]; then
       echo "ABANDONED"
     elif [[ "$kind" == "chat" ]]; then
       echo "CHAT"
@@ -61,7 +61,7 @@ endy_log_status() {
     return
   fi
 
-  if [[ -n "$task_id" && "$exists_in_tmux" == "0" ]]; then
+  if [[ -n "$task_id" && "$alive_in_tmux" == "0" ]]; then
     echo "ABANDONED"
   elif [[ "$kind" == "chat" ]]; then
     echo "CHAT"
