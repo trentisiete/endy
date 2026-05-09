@@ -312,7 +312,7 @@
       // Initial dump of the last 200 lines
       const res = await apiFetch(`/api/tasks/${tid}`);
       const d = await res.json();
-      const win = d.window || `endy:task-${tid}`;
+      const win = d.window || `${d.session || 'endy'}:task-${tid}`;
       const shortParent = d.parent_task ? shortTaskRef(d.parent_task) : "";
       $("#log-meta").innerHTML = `
         <div><span class="k">kind</span> <span class="v">${escapeHtml(d.kind || "spawn")}</span></div>
@@ -326,7 +326,7 @@
         <div><span class="k">runtime</span> <span class="v">${fmtRuntime(d.runtime_s)}</span></div>
         <div><span class="k">status</span> <span class="v">${escapeHtml(d.status)}</span></div>`;
       $("#log-commands").innerHTML = `
-        <div><code>tmux attach -t endy</code></div>
+        <div><code>tmux attach -t ${escapeHtml(d.session || 'endy')}</code></div>
         <div><code>tmux select-window -t ${escapeHtml(win)}</code></div>
         <div><code>endy watch follow ${escapeHtml(tid)}</code></div>
         <div><code>endy watch chat ${escapeHtml(tid)}</code></div>

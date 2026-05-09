@@ -116,7 +116,7 @@ endy stop --all             # stop every endy session
 | Goal | Command |
 |---|---|
 | Spawn a long task | `endy spawn opencode -- "write tests for src/foo"` |
-| Ask a quick blocking question | `endy ask opencode "summarize this repo"` |
+| Ask a quick blocking question | `endy ask cmd "what's in this dir"` — prefer `cmd` for speed; `opencode` runs a full agent loop |
 | See active tasks | `endy watch tree` |
 | Browse tasks interactively | `endy watch browse` |
 | See every project | `endy watch list --overview` |
