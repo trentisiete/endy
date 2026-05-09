@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-# Apply the endy tmux status line and tree window to an existing session.
+# Apply the endy tmux status line and tree window to the session named by
+# $ENDY_SESSION (defaults to "endy" for the global/overview session).
 
 set -euo pipefail
 
-SESSION="${ENDY_TMUX_SESSION:-endy}"
+SESSION="${ENDY_SESSION:-endy}"
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
+scope="per-dir"
+tree_args=""
+if [[ "$SESSION" == "endy" ]]; then
+  scope="overview"
+  tree_args="--overview"
+fi
+q_session="$(printf '%q' "$SESSION")"
+q_log_dir="$(printf '%q' "$LOG_DIR")"
+q_endy_root="$(printf '%q' "$ENDY_ROOT")"
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' is not running; run: endy start" >&2
@@ -23,10 +36,12 @@ refresh_count=0
 refreshes_per_history_clear=3600  # 5 hours at one refresh every 5 seconds.
 while :; do
   printf '\033[H\033[2J'
-  printf '\033[1;36mendy watch tree\033[0m\n'
+  export ENDY_SESSION=${q_session}
+  export ENDY_LOG_DIR=${q_log_dir}
+  printf '\033[1;36mendy watch tree  (scope=%s session=%s)\033[0m\n' '${scope}' '${SESSION}'
   printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach | Ctrl-b & kill window | Ctrl-b x kill pane\033[0m\n'
   printf '\033[1;33mendy: watch browse | watch tree --all | watch dir <path> | watch chat <id> | watch kill-all --cwd <path>\033[0m\n\n'
-  ${ENDY_ROOT}/bin/endy watch tree
+  ${q_endy_root}/bin/endy watch tree ${tree_args}
   refresh_count=\$((refresh_count + 1))
   if [[ \"\$refresh_count\" -ge \"\$refreshes_per_history_clear\" ]]; then
     tmux clear-history -t ${SESSION}:tree 2>/dev/null || true

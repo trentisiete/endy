@@ -15,8 +15,25 @@ if [[ -z "$ID" ]]; then
 fi
 
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 META="${LOG_DIR}/task-${ID}.meta"
+# Fallback: search every per-dir scope if the meta isn't in our default LOG_DIR
+# (preview is invoked by fzf with just an ID; LOG_DIR is whatever scope the
+# parent watch invocation was in, but if the ID actually lives in another
+# per-dir session, find it).
+if [[ ! -f "$META" ]]; then
+  while IFS= read -r _dir; do
+    if [[ -f "${_dir}/task-${ID}.meta" ]]; then
+      LOG_DIR="$_dir"
+      META="${_dir}/task-${ID}.meta"
+      break
+    fi
+  done < <(_endy_list_per_dir_log_dirs)
+  unset _dir
+fi
 
 # ── colours ────────────────────────────────────────────────────────────────
 RED='\033[31m'
@@ -71,7 +88,10 @@ fi
 # shellcheck source=lib/status.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/status.sh"
 
-st="$(endy_log_status "$LOG" "$ID" "$kind" "endy")"
+_session_for_status="${window%%:*}"
+[[ -z "$_session_for_status" || "$_session_for_status" == "$window" ]] && _session_for_status="$SESSION"
+st="$(endy_log_status "$LOG" "$ID" "$kind" "$_session_for_status")"
+unset _session_for_status
 case "$st" in
   RUN|PENDING|CHAT) stc="${BLU}● ${st}${RST}" ;;
   DONE)          stc="${GRN}● ${st}${RST}" ;;
@@ -115,10 +135,13 @@ printf "  ${DIM}CWD       ${RST}%s\n" "$cwd"
 printf "  ${DIM}SPAWNED   ${RST}%s${GREY}  (${runtime} ago)${RST}\n" "$spawned_iso"
 printf '\n'
 
+_tmux_session="${window%%:*}"
+[[ -z "$_tmux_session" || "$_tmux_session" == "$window" ]] && _tmux_session="$SESSION"
 printf "${CYAN}──── tmux commands ───────────────────────────────────────────${RST}\n"
-printf "tmux attach -t endy\n"
-[[ -n "$window_name" ]] && printf "tmux select-window -t endy:%s\n" "$window_name"
-[[ -n "$window_name" ]] && printf "tmux kill-window -t endy:%s\n" "$window_name"
+printf "tmux attach -t %s\n" "$_tmux_session"
+[[ -n "$window_name" ]] && printf "tmux select-window -t %s:%s\n" "$_tmux_session" "$window_name"
+[[ -n "$window_name" ]] && printf "tmux kill-window -t %s:%s\n" "$_tmux_session" "$window_name"
+unset _tmux_session
 printf "endy watch view %s\n" "$ID"
 printf "endy watch chat %s\n" "$ID"
 printf "endy watch followup %s -- \"<next prompt>\"\n" "$ID"

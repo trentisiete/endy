@@ -41,6 +41,10 @@ OPENCODE_DIR="${HOME}/.config/opencode"
 CMDCODE_DIR="${HOME}/.commandcode"
 LOCAL_BIN="${HOME}/.local/bin"
 
+# Pre-create the per-dir log root so first `endy start` from any cwd has a
+# place to land its logs without racing on directory creation.
+mkdir -p "${ENDY_ROOT}/.logs/per-dir"
+
 CODEX_CONFIG="${CODEX_DIR}/config.toml"
 MARKER_BEGIN="# >>> endy v0.1 (managed by ${ENDY_ROOT}/scripts/install.sh)"
 MARKER_END="# <<< endy v0.1"
@@ -61,8 +65,9 @@ confirm() {
 # ----------------------------------------------------------------------------
 # 0. Sanity
 # ----------------------------------------------------------------------------
-[[ -d "$CODEX_DIR"    ]] || { warn "no ~/.codex — install Codex first"; exit 1; }
+[[ -d "$CODEX_DIR"    ]] || warn "no ~/.codex yet — will create it"
 [[ -d "$OPENCODE_DIR" ]] || warn "no ~/.config/opencode — will create on link"
+mkdir -p "$CODEX_DIR"
 
 cat <<EOF
 
@@ -178,8 +183,32 @@ mkdir -p "${LOCAL_BIN}"
 link_one_file "${ENDY_ROOT}/bin/endy" "${LOCAL_BIN}/endy"
 case ":$PATH:" in
   *":${LOCAL_BIN}:"*) ok "${LOCAL_BIN} already on PATH" ;;
-  *) warn "${LOCAL_BIN} is NOT on your PATH — add this to ~/.zshrc or ~/.bashrc:"
-     printf '       export PATH="%s:$PATH"\n' "${LOCAL_BIN}" >&2 ;;
+  *)
+    rc=""
+    case "$(basename "${SHELL:-zsh}")" in
+      zsh)  rc="${HOME}/.zshrc"  ;;
+      bash) rc="${HOME}/.bashrc" ;;
+      *)    rc="" ;;
+    esac
+    path_line='export PATH="$HOME/.local/bin:$PATH"'
+    if [[ -n "$rc" ]]; then
+      touch "$rc"
+      if grep -Fq "${LOCAL_BIN}" "$rc" || grep -Fq "$path_line" "$rc"; then
+        ok "${LOCAL_BIN} already configured in $rc"
+      else
+        {
+          printf '\n# >>> endy PATH (managed by endy install)\n'
+          printf '%s\n' "$path_line"
+          printf '# <<< endy PATH\n'
+        } >> "$rc"
+        ok "added ${LOCAL_BIN} to PATH in $rc"
+      fi
+      warn "reload your shell before using plain 'endy': exec \"\$SHELL\" -l"
+    else
+      warn "${LOCAL_BIN} is NOT on your PATH — add this to your shell rc:"
+      printf '       %s\n' "$path_line" >&2
+    fi
+    ;;
 esac
 
 # ----------------------------------------------------------------------------
@@ -263,14 +292,16 @@ cat <<EOF
 $(ok "install complete")
 
 You now have a single CLI:  endy
-  endy doctor                  → check every agent's install/auth state
-  endy start                   → launch the tmux gateway
+  endy doctor                  → check python3, tmux, agents, config, and sessions
+  endy start                   → launch this cwd's per-dir tmux gateway
+  endy overview                → launch the global all-session overview
   endy watch list              → see all tasks (status / agent / cwd / runtime / last)
   endy spawn opencode -- "..."  → fire a long detached task
   endy codex --root            → start codex from endy project root with full context
   endy help                    → all subcommands
 
-If \`endy\` isn't found, ${LOCAL_BIN} isn't on PATH yet — see warning above.
+If \`endy\` is not found in this terminal yet, reload your shell:
+  exec "\$SHELL" -l
 
 To flip the MCP path on later (still hybrid bash by default):
   cd ${ENDY_ROOT}/mcp-shims && npm install
