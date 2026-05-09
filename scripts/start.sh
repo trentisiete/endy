@@ -11,22 +11,25 @@
 #   --serve-opencode opens an `opencode serve` window.
 #   --logs opens a log-tail window.
 #
-# Reattach from anywhere on the Tailnet with:
-#   ssh $USER@<host> -t 'tmux attach -t endy'
+# Reattach from anywhere on the Tailnet with the session printed by start:
+#   ssh $USER@<host> -t 'tmux attach -t <session>'
 
 set -euo pipefail
 
-SESSION="endy"
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
-mkdir -p "$LOG_DIR"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
 
+mode="per-dir"
 attach=1
 clean=0
 serve_opencode=0
 show_logs=0
+launch_cwd="$(pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode=*)    mode="${1#--mode=}"; shift ;;
+    --mode)      mode="$2"; shift 2 ;;
     --no-attach) attach=0; shift ;;
     --clean) clean=1; shift ;;
     --serve-opencode) serve_opencode=1; shift ;;
@@ -37,6 +40,28 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$mode" in
+  overview)
+    SESSION="${ENDY_SESSION:-endy}"
+    LOG_DIR="${ENDY_LOG_DIR:-${ENDY_ROOT}/.logs}"
+    ;;
+  per-dir)
+    if [[ -n "${ENDY_SESSION:-}" ]]; then
+      SESSION="$ENDY_SESSION"
+    else
+      SESSION="$(_endy_session_name "$launch_cwd")"
+    fi
+    LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
+    ;;
+  *) echo "unknown --mode: $mode (per-dir|overview)" >&2; exit 2 ;;
+esac
+
+mkdir -p "$LOG_DIR"
+[[ "$mode" == "per-dir" ]] && _endy_record_session_owner "$SESSION" "$launch_cwd"
+
+# Propagate to every script we exec/spawn.
+export ENDY_ROOT ENDY_SESSION="$SESSION" ENDY_LOG_DIR="$LOG_DIR"
 
 configure_tmux_help() {
   "${ENDY_ROOT}/scripts/tmux-help.sh" >/dev/null 2>&1 || true
@@ -59,13 +84,22 @@ cleanup_runtime_windows() {
 }
 
 open_manager_windows() {
+  local browse_args=""
+  local scope="$mode"
+  [[ "$mode" == "overview" ]] && browse_args="--overview"
+  local q_session q_log_dir q_endy_root
+  q_session="$(printf '%q' "$SESSION")"
+  q_log_dir="$(printf '%q' "$LOG_DIR")"
+  q_endy_root="$(printf '%q' "$ENDY_ROOT")"
   kill_window_if_exists watch
   tmux new-window -t "$SESSION" -n watch -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "clear
-printf '\033[1;36mendy watch browse\033[0m\n'
+export ENDY_SESSION=${q_session}
+export ENDY_LOG_DIR=${q_log_dir}
+printf '\033[1;36mendy watch browse  (scope=%s session=%s)\033[0m\n' '${scope}' '${SESSION}'
 printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach\033[0m\n'
 printf '\033[1;33menter chat/switch | Ctrl-o open chat here | Ctrl-f follow | Ctrl-v view | Ctrl-l log | Ctrl-k kill | esc exit\033[0m\n\n'
-${ENDY_ROOT}/bin/endy watch browse
+${q_endy_root}/bin/endy watch browse ${browse_args}
 BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 ")"
 
@@ -80,17 +114,19 @@ BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 }
 
 open_optional_windows() {
+  local q_log_dir
+  q_log_dir="$(printf '%q' "$LOG_DIR")"
   if [[ "$serve_opencode" == "1" ]]; then
     kill_window_if_exists opencode
     tmux new-window -t "$SESSION" -n opencode -c "$ENDY_ROOT" \
-      "bash -lc $(printf '%q' "opencode serve 2>&1 | tee ${LOG_DIR}/opencode-serve.log")"
+      "bash -lc $(printf '%q' "opencode serve 2>&1 | tee ${q_log_dir}/opencode-serve.log")"
   fi
 
   if [[ "$show_logs" == "1" ]]; then
     kill_window_if_exists logs
     tmux new-window -t "$SESSION" -n logs -c "$ENDY_ROOT" \
-      "bash -lc $(printf '%q' "touch ${LOG_DIR}/opencode-serve.log
-tail -F ${LOG_DIR}/opencode-serve.log
+      "bash -lc $(printf '%q' "touch ${q_log_dir}/opencode-serve.log
+tail -F ${q_log_dir}/opencode-serve.log
 ")"
   fi
 }
@@ -121,9 +157,19 @@ EOF
 fi
 
 # window 0: orchestrator
-tmux new-session  -d -s "$SESSION" -n orchestrator -c "$ENDY_ROOT"
+# In per-dir mode the orchestrator opens in the launch cwd; in overview mode
+# it opens in the endy repo root (same as the original behavior).
+if [[ "$mode" == "per-dir" ]]; then
+  ORCH_CWD="$launch_cwd"
+else
+  ORCH_CWD="$ENDY_ROOT"
+fi
+q_orch_cwd="$(printf '%q' "$ORCH_CWD")"
+q_session="$(printf '%q' "$SESSION")"
+q_log_dir="$(printf '%q' "$LOG_DIR")"
+tmux new-session  -d -s "$SESSION" -n orchestrator -c "$ORCH_CWD"
 tmux send-keys -t "${SESSION}:orchestrator" \
-  "export ENDY_ORCHESTRATOR=orchestrator; export ENDY_ORCHESTRATOR_AGENT=codex; export ENDY_ORCHESTRATOR_CWD=${ENDY_ROOT}; codex" C-m
+  "export ENDY_ORCHESTRATOR=orchestrator; export ENDY_ORCHESTRATOR_AGENT=codex; export ENDY_ORCHESTRATOR_CWD=${q_orch_cwd}; export ENDY_SESSION=${q_session}; export ENDY_LOG_DIR=${q_log_dir}; codex" C-m
 
 # windows 1 and 2: manager panes
 open_manager_windows

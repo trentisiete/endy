@@ -22,8 +22,10 @@
 set -euo pipefail
 
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
-SESSION="endy"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 
 agent=""
 persona=""
@@ -52,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --parent-task)  parent_task="$2";  shift 2 ;;
     --orchestrator) orchestrator="$2"; shift 2 ;;
     --orchestrator-agent) orchestrator_agent="$2"; shift 2 ;;
+    --session)      SESSION="$2";      shift 2 ;;
+    --log-dir)      LOG_DIR="$2";      shift 2 ;;
     --full-auto)    full_auto=1;       shift   ;;
     --no-select)    select_window=0;   shift   ;;
     --initial-message) initial_message="$2"; shift 2 ;;

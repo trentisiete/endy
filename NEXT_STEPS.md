@@ -19,6 +19,7 @@ Before touching code:
 
 ## What's verified working (May 2026)
 
+- ✅ **Per-directory sessions + global overview** — `endy start` now creates a cwd-scoped session (`endy-<basename>` with hash suffix on collision) and writes logs under `.logs/per-dir/<session>/`; `endy overview` preserves the global `endy` session and aggregates global plus per-dir logs. Re-verified 2026-05-09 with real `start`, `overview`, `watch tree --overview --all`, web task loading, and `spawn --prompt-file` smokes.
 - ✅ `endy install` — idempotent symlinks of agents, skills, AGENTS.md, `bin/endy` to `~/.local/bin`. Tested by re-running multiple times.
 - ✅ `endy doctor` — checks tmux + 4 CLIs + AGENTS.md + tmux session. Tested.
 - ✅ `endy ask <agent> "<prompt>"` — short blocking calls, tested with opencode (`ENDY-CLI-OK`) and cmd (`CMD-CLI-OK`).
@@ -26,11 +27,13 @@ Before touching code:
 - ✅ `endy watch list / tree / dir / log / view / follow / browse / panel / kill` — all working.
   - Multiple parallel `follow` windows confirmed (TASK-ALPHA + TASK-BRAVO simultaneously).
   - Browse uses fzf 0.71+ with `--preview-window=right:50%:wrap:follow` for live tail in the right pane, and supports `--cwd` / `--orch` filters.
+  - `list`, `tree`, and `browse` support `--overview` / `--all-sessions`; `tree --overview --all` prints the real session per task in its tmux attach hints.
   - `^Y` in browse copies task id to system clipboard via pbcopy.
 - ✅ Orchestrator/source metadata — new spawns record `orchestrator`, `orchestrator_agent`, `origin_window`, `origin_pane`, `origin_cwd`; `endy watch tree` groups by orchestrator first and directory second.
 - ✅ `endy orchestrator <name> --cwd <dir>` — opens additional orchestrator tmux windows with `ENDY_ORCHESTRATOR` exported so subagents are attributed to the right manager/workstream.
 - ✅ `endy tmux-help` / `endy start` tmux hints — status line shows the key tmux commands and a persistent `tree` window auto-refreshes the orchestrator/directory view plus delete/window/chat/watch commands.
 - ✅ `endy start --clean --no-attach` — recreates manager layout without attaching: window 1 `watch` runs `endy watch browse`, window 2 `docs` opens README/NEXT_STEPS, window 3 `tree` auto-refreshes `endy watch tree`, and stale `task-*`/`chat-*`/`follow-*`/`panel`/`tree`/`help`/`opencode`/`logs` windows are closed.
+- ✅ `endy overview --clean --no-attach` — recreates the global all-session manager; watch/tree banners explicitly show `scope=overview session=endy`, while per-dir managers show `scope=per-dir session=<name>`.
 - ✅ `opencode serve` is now opt-in via `endy start --serve-opencode --logs`; it no longer appears as a noisy default manager window.
 - ✅ `endy watch browse` is now active-task and chat-first: default view shows only active tasks/chats, `--all` includes history; Enter opens `endy watch chat <id>` and switches to it, `^O` opens chat in the background and keeps browse open, `^F` opens a live follow window, `^V` views, `^L` logs, `^K` kills.
 - ✅ `endy watch kill-all` — closes matching task/chat/follow windows by `--agent`, `--cwd`, `--orch`, or explicit `--everything`, and prints the tmux commands for full-session shutdown.
@@ -75,6 +78,25 @@ Only Hermes native resume still needs a live smoke. opencode and cmd followups a
 ---
 
 ## Recent verification notes
+
+### Per-directory sessions release pass
+
+**Done 2026-05-09.** Files: `bin/endy`, `scripts/lib/session.sh`, `scripts/start.sh`, `scripts/tmux-help.sh`, `scripts/endy-watch.sh`, `scripts/spawn-long-task.sh`, `scripts/spawn-chat.sh`, `scripts/check-long-task.sh`, `scripts/_endy-preview.sh`, `web/server.py`, `README.md`, `AGENTS.md`.
+
+**Verified:**
+
+- `bash -n` passes for all touched shell scripts, including `scripts/lib/session.sh`.
+- `python3 -m py_compile web/server.py` passes.
+- `./bin/endy help | rg 'overview|per-dir|--all|--session'` shows the new lifecycle/options.
+- `endy overview --clean --no-attach` creates `endy` with `orchestrator/watch/docs/tree`; `tmux capture-pane -t endy:watch` shows `scope=overview session=endy`.
+- `endy start --clean --no-attach` from this repo creates `endy-endy-per-dir` with `orchestrator/watch/docs/tree`; `tmux capture-pane -t endy-endy-per-dir:watch` shows `scope=per-dir session=endy-endy-per-dir`.
+- `endy watch tree --overview --all` prints both `tmux attach -t endy` and `tmux attach -t endy-endy-per-dir` when tasks exist in both scopes.
+- `endy spawn opencode --supervised --prompt-file /private/tmp/endy-prompt-file-smoke.md` completed as task `20260509-103708-faab` and logged `ENDY-PROMPT-FILE-SMOKE` with `ENDY_EXIT=0`.
+- `web.server.list_tasks()` sees both global and per-dir tasks and includes `session` in task JSON.
+
+**Notes:**
+
+- An independent endy/opencode review task (`20260509-103845-615f`) ran `bash -n` and `py_compile` but ended without a wrapper `ENDY_EXIT` marker; the useful output is in its log, and local verification above is the release gate.
 
 ### OpenCode context and slash usage
 
