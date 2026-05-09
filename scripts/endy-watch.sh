@@ -423,9 +423,9 @@ cmd_list() {
     local parent_short="—"
     [[ -n "$parent" ]] && parent_short="$(short_task_ref "$parent")"
 
-    # spawned_iso is ISO-8601 UTC like 2026-05-05T10:18:27Z. macOS date -j -f.
+    # spawned_iso is ISO-8601 UTC like 2026-05-05T10:18:27Z. Uses _endy_iso_to_epoch (portable).
     local spawned_epoch
-    spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
+    spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local runtime
     if [[ "$spawned_epoch" != "0" ]]; then
       runtime="$(human_runtime $((now - spawned_epoch)))"
@@ -516,7 +516,7 @@ cmd_tree() {
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local parent; parent="$(meta_field "$m" parent_task)"; parent="${parent:-—}"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
-    local spawned_epoch; spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
+    local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local runtime="?"
     [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
     local last="(no log yet)"
@@ -733,7 +733,7 @@ cmd_browse() {
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local spawned_epoch
-    spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
+    spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local rt="?"
     [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
     local st; st="$(log_status "$log" "$id" "$kind")"

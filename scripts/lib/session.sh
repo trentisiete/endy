@@ -162,6 +162,9 @@ _endy_record_session_owner() {
   printf '%s\n' "$cwd" > "${dir}/.cwd"
 }
 
+# shellcheck source=lib/timefmt.sh
+. "$(dirname "${BASH_SOURCE[0]}")/timefmt.sh"
+
 # _endy_worktree_root [path]
 # If <path> (default: pwd) is inside a git worktree, print the worktree's
 # root absolute path. Otherwise print pwd.

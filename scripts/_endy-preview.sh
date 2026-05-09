@@ -109,7 +109,7 @@ human_runtime() {
   else                              printf '%dd%02dh' $((secs/86400)) $(((secs%86400)/3600))
   fi
 }
-spawned_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$spawned_iso" +%s 2>/dev/null || echo 0)"
+spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
 runtime=""
 if [[ "$spawned_epoch" != "0" ]]; then
   now="$(date +%s)"
