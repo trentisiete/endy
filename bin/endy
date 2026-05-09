@@ -2,7 +2,7 @@
 # endy — single entry point to the endy multi-agent stack.
 #
 # Subcommands group together the underlying scripts so you have one CLI
-# to remember. Tab completion: see scripts/endy-completion.sh (TODO).
+# to remember. Tab completion is installed from scripts/endy-completion.sh.
 #
 # Lifecycle
 #   endy install                      Symlink configs/skills/agents into ~/. (idempotent.)
@@ -17,7 +17,7 @@
 #   endy stop --session <name>        Kill one named endy tmux session.
 #   endy stop --all                   Kill every endy* tmux session.
 #   endy status                       Show tmux + Codex MCP + Tailscale status.
-#   endy doctor                       Check that every agent CLI is installed and authed.
+#   endy doctor                       Check python3, tmux, installed agents, config, and sessions.
 #
 # Agents (interactive — current cwd is the agent's project root)
 #   endy codex [args]                 Start a Codex session here. Endy context is loaded
@@ -101,6 +101,41 @@ _endy_apply_session
 
 die() { echo "endy: $*" >&2; exit 1; }
 
+doctor_version_line() {
+  local bin="$1"
+  if ! command -v python3 >/dev/null; then
+    printf 'installed (version check skipped; python3 missing)\n'
+    return 0
+  fi
+
+  python3 - "$bin" <<'PY'
+import subprocess
+import sys
+
+binary = sys.argv[1]
+try:
+    result = subprocess.run(
+        [binary, "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=2,
+    )
+except subprocess.TimeoutExpired:
+    print("installed (version check timed out)")
+except Exception:
+    print("installed")
+else:
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    preferred = [
+        line for line in lines
+        if not line.lower().startswith(("warning:", "update available"))
+    ]
+    line = preferred[0] if preferred else (lines[-1] if lines else "")
+    print(line or "installed")
+PY
+}
+
 show_help() {
   sed -n '2,62p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -131,6 +166,7 @@ show_agent_help() {
       print "──────────────────────────────────────────────"
       print; next
     }
+    in_section && /^## /  { exit }
     in_section && /^### / { exit }
     in_section && /^---/  { exit }
     in_section { print }
@@ -233,14 +269,22 @@ cmd_doctor() {
   local ok=1
   printf 'tmux ............ '
   if command -v tmux >/dev/null; then printf '✓ %s\n' "$(tmux -V)"; else printf '✗ missing\n'; ok=0; fi
+  printf 'python3 ......... '
+  if command -v python3 >/dev/null; then printf '✓ %s\n' "$(python3 --version 2>&1)"; else printf '✗ missing\n'; ok=0; fi
+  local agent_ok=0
   for bin in codex opencode cmd hermes; do
     printf '%-15s ' "$bin"
     if command -v "$bin" >/dev/null; then
-      printf '✓ %s\n' "$("$bin" --version 2>/dev/null | head -1 || echo installed)"
+      agent_ok=1
+      printf '✓ %s\n' "$(doctor_version_line "$bin")"
     else
-      printf '✗ not installed\n'; ok=0
+      printf '· not installed (optional)\n'
     fi
   done
+  if [[ "$agent_ok" == "0" ]]; then
+    printf 'agents ......... ✗ install at least one of: codex, opencode, cmd, hermes\n'
+    ok=0
+  fi
   printf 'AGENTS.md ....... '
   if [[ -L "${HOME}/.codex/AGENTS.md" || -f "${HOME}/.codex/AGENTS.md" ]]; then
     printf '✓ ~/.codex/AGENTS.md\n'
