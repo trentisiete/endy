@@ -36,9 +36,43 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 ENDY_ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = ENDY_ROOT / ".logs"
+GLOBAL_LOG_DIR = ENDY_ROOT / ".logs"           # overview / legacy tasks
+PER_DIR_ROOT  = GLOBAL_LOG_DIR / "per-dir"     # one subdir per per-dir session
+LOG_DIR       = GLOBAL_LOG_DIR                 # back-compat alias for legacy callers
 SCRIPTS = ENDY_ROOT / "scripts"
 WEB_DIR = ENDY_ROOT / "web"
+
+
+def iter_log_dirs() -> list:
+    """Every log dir endy knows about: global + every per-dir/<session>/."""
+    dirs = []
+    if GLOBAL_LOG_DIR.exists():
+        dirs.append(GLOBAL_LOG_DIR)
+    if PER_DIR_ROOT.exists():
+        for d in sorted(PER_DIR_ROOT.iterdir()):
+            if d.is_dir():
+                dirs.append(d)
+    return dirs
+
+
+def find_meta(tid: str):
+    """Locate a task's meta file across global + per-dir scopes."""
+    for d in iter_log_dirs():
+        candidate = d / f"task-{tid}.meta"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def session_for_meta(meta_path: Path) -> str:
+    """Endy session a meta file belongs to, derived from its parent dir.
+    Global LOG_DIR -> 'endy'; per-dir/<session>/ -> '<session>'."""
+    parent = meta_path.parent
+    if parent == GLOBAL_LOG_DIR:
+        return "endy"
+    if parent.parent == PER_DIR_ROOT:
+        return parent.name
+    return "endy"
 
 # Optional shared-token auth. If ENDY_WEB_TOKEN is set in the environment,
 # every request must carry it via the X-Endy-Token header or ?token=<value>
@@ -93,14 +127,20 @@ def parse_meta(meta_path: Path) -> dict:
     return out
 
 
-def meta_log_path(tid: str, meta_data: dict) -> Path:
+def meta_log_path(tid: str, meta_data: dict, meta_path: Path | None = None) -> Path:
     raw = meta_data.get("log") or ""
-    return Path(raw) if raw else LOG_DIR / f"task-{tid}.log"
+    if raw:
+        return Path(raw)
+    base = meta_path.parent if meta_path else LOG_DIR
+    return base / f"task-{tid}.log"
 
 
-def meta_prompt_path(tid: str, meta_data: dict) -> Path:
+def meta_prompt_path(tid: str, meta_data: dict, meta_path: Path | None = None) -> Path:
     raw = meta_data.get("prompt") or ""
-    return Path(raw) if raw else LOG_DIR / f"task-{tid}.prompt.md"
+    if raw:
+        return Path(raw)
+    base = meta_path.parent if meta_path else LOG_DIR
+    return base / f"task-{tid}.prompt.md"
 
 
 def tmux_window_alive(meta_data: dict) -> bool:
@@ -226,12 +266,14 @@ def runtime_seconds(spawned_iso: str) -> int:
 
 def list_tasks() -> list:
     tasks = []
-    if not LOG_DIR.exists():
-        return tasks
-    for meta in sorted(LOG_DIR.glob("task-*.meta")):
+    metas = []
+    for d in iter_log_dirs():
+        metas.extend(d.glob("task-*.meta"))
+    metas.sort(key=lambda p: p.name)
+    for meta in metas:
         tid = meta.stem.replace("task-", "")
         meta_data = parse_meta(meta)
-        log_path = meta_log_path(tid, meta_data)
+        log_path = meta_log_path(tid, meta_data, meta_path=meta)
         tasks.append(
             {
                 "task_id": tid,
@@ -248,6 +290,7 @@ def list_tasks() -> list:
                 "spawned_at": meta_data.get("spawned_at", ""),
                 "parent_task": meta_data.get("parent_task", ""),
                 "resume_id": meta_data.get("resume_id", ""),
+                "session": session_for_meta(meta),
                 "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
                 "status": task_status(log_path, meta_data),
                 "last": task_last_line(log_path, meta_data.get("kind", "spawn")),
@@ -258,12 +301,12 @@ def list_tasks() -> list:
 
 
 def task_detail(tid: str) -> dict | None:
-    meta_path = LOG_DIR / f"task-{tid}.meta"
-    if not meta_path.exists():
+    meta_path = find_meta(tid)
+    if meta_path is None:
         return None
     meta_data = parse_meta(meta_path)
-    log_path = meta_log_path(tid, meta_data)
-    prompt_path = meta_prompt_path(tid, meta_data)
+    log_path = meta_log_path(tid, meta_data, meta_path=meta_path)
+    prompt_path = meta_prompt_path(tid, meta_data, meta_path=meta_path)
     log_text = ""
     if log_path.exists():
         text = log_path.read_text(errors="replace")
@@ -287,6 +330,7 @@ def task_detail(tid: str) -> dict | None:
         "parent_task": meta_data.get("parent_task", ""),
         "resume_id": meta_data.get("resume_id", ""),
         "window": meta_data.get("window", ""),
+        "session": session_for_meta(meta_path),
         "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
         "status": task_status(log_path, meta_data),
         "log_tail": log_text,
@@ -295,8 +339,20 @@ def task_detail(tid: str) -> dict | None:
     }
 
 
+def _env_for_task(tid: str) -> dict:
+    """Build a subprocess env that pins ENDY_SESSION/ENDY_LOG_DIR to the task's
+    actual scope, so endy-watch.sh subcommands resolve the right meta/log."""
+    env = os.environ.copy()
+    p = find_meta(tid)
+    if p is not None:
+        env["ENDY_SESSION"] = session_for_meta(p)
+        env["ENDY_LOG_DIR"] = str(p.parent)
+    return env
+
+
 def spawn_task(agent: str, prompt: str, persona: str = "", cwd: str = "",
-               model: str = "", full_auto: bool = True) -> dict:
+               model: str = "", full_auto: bool = True,
+               session: str = "", log_dir: str = "") -> dict:
     args = [str(SCRIPTS / "spawn-long-task.sh"), "--agent", agent, "--prompt", prompt]
     if persona:
         args += ["--persona", persona]
@@ -304,6 +360,10 @@ def spawn_task(agent: str, prompt: str, persona: str = "", cwd: str = "",
         args += ["--cwd", cwd]
     if model:
         args += ["--model", model]
+    if session:
+        args += ["--session", session]
+    if log_dir:
+        args += ["--log-dir", log_dir]
     args += ["--orchestrator", "web", "--orchestrator-agent", "web"]
     if full_auto:
         args += ["--full-auto"]
@@ -320,7 +380,7 @@ def spawn_task(agent: str, prompt: str, persona: str = "", cwd: str = "",
 def kill_task(tid: str) -> dict:
     res = subprocess.run(
         [str(SCRIPTS / "endy-watch.sh"), "kill", tid],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_env_for_task(tid),
     )
     return {"stdout": res.stdout, "stderr": res.stderr, "rc": res.returncode}
 
@@ -330,6 +390,7 @@ def followup_task(tid: str, prompt: str) -> dict:
         [str(SCRIPTS / "endy-watch.sh"), "followup", tid, "--", prompt],
         capture_output=True,
         text=True,
+        env=_env_for_task(tid),
     )
     out = {"stdout": res.stdout, "stderr": res.stderr, "rc": res.returncode}
     for ln in res.stdout.splitlines():
@@ -347,8 +408,15 @@ def followup_task(tid: str, prompt: str) -> dict:
 def stream_log(handler, tid: str):
     """SSE: emit each new log line as it arrives, until ENDY_EXIT seen
     or the client disconnects."""
-    meta_data = parse_meta(LOG_DIR / f"task-{tid}.meta")
-    log_path = meta_log_path(tid, meta_data)
+    meta_path = find_meta(tid)
+    if meta_path is None:
+        try:
+            handler.send_error(404, "task not found")
+        except Exception:
+            pass
+        return
+    meta_data = parse_meta(meta_path)
+    log_path = meta_log_path(tid, meta_data, meta_path=meta_path)
 
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
@@ -651,7 +719,8 @@ def main():
 
     srv = ThreadingServer((host, args.port), Handler)
     print(f"endy web listening on http://{host}:{args.port}", file=sys.stderr)
-    print(f"  tasks dir: {LOG_DIR}", file=sys.stderr)
+    for d in iter_log_dirs():
+        print(f"  tasks dir: {d}", file=sys.stderr)
     if host.startswith("100.") or host == "0.0.0.0":
         print("  reachable from Tailnet — make sure Tailscale is up", file=sys.stderr)
     try:

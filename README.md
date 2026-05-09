@@ -1,181 +1,268 @@
 # endy
 
-A multi-agent control plane for coding CLIs. Run **Codex**, **OpenCode**, **CommandCode** (`cmd`), and **Hermes** (Nous Research) from one terminal command, with a single tmux session that holds all spawned agent tasks, their logs, their conversation state, and their inter-relationships.
+endy is a local control plane for coding agents. It runs Codex, OpenCode,
+CommandCode (`cmd`), Hermes, and other CLI agents inside tmux, records every
+task to logs, and gives you one command surface for spawning, watching,
+resuming, and stopping work.
 
+Use it when you want:
+
+- one tmux session per project
+- a global overview of every endy project
+- durable task logs in `.logs/`
+- simple delegation with `endy spawn ...`
+
+## Install
+
+Requirements:
+
+- macOS or Linux
+- `python3`
+- `tmux`
+- at least one agent CLI on `PATH`: `codex`, `opencode`, `cmd`, or `hermes`
+- optional: `fzf` for the interactive task picker
+
+Install the system tools first if needed:
+
+```bash
+# macOS
+brew install tmux fzf
+
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y python3 tmux fzf
 ```
-                         ┌────────── you ──────────┐
-                         │   endy <subcommand>      │   ← terminal CLI
-                         │   endy web              │   ← phone-friendly web UI
-                         │   ssh + tmux attach     │   ← raw tmux when you want it
-                         └───────────┬─────────────┘
-                                     │
-                    ┌────────────────┼────────────────┐
-                    │   endy backend (single host)    │
-                    │                                 │
-                    │   .logs/  ← source of truth    │
-                    │   spawn-long-task.sh ← spawner │
-                    │   tmux session 'endy' ← runtime│
-                    │                                 │
-                    └─────┬────┬───┬──────┬───────────┘
-                          │    │   │      │
-                       codex  opencode cmd hermes
-                          │    │   │      │
-                       (agents can also call `endy spawn …` themselves —
-                        AGENTS.md is symlinked into each agent's home dir)
-```
 
----
-
-## Table of contents
-
-1. [What endy is and isn't](#what-endy-is-and-isnt)
-2. [Prerequisites](#prerequisites)
-3. [Install](#install)
-4. [Configure](#configure)
-5. [The `endy` CLI — every subcommand](#the-endy-cli)
-6. [The `endy watch` family — monitoring and follow-up](#the-endy-watch-family)
-7. [The web dashboard](#the-web-dashboard)
-8. [How agents themselves use endy](#how-agents-themselves-use-endy)
-9. [File layout and conventions](#file-layout-and-conventions)
-10. [Per-CLI gotchas (read these before debugging)](#per-cli-gotchas)
-11. [Troubleshooting](#troubleshooting)
-12. [Roadmap and open work](#roadmap-and-open-work) — see [NEXT_STEPS.md](NEXT_STEPS.md) for the full handoff to the next implementing agent.
-
----
-
-## One-shot install
-
-Already have at least one of `codex` / `opencode` / `cmd` / `hermes` installed and on `PATH`? Then:
+Then install endy:
 
 ```bash
 git clone https://github.com/trentisiete/endy.git ~/Downloads/endy
 cd ~/Downloads/endy
-./scripts/install.sh --yes        # symlinks agents/skills/AGENTS.md, puts endy on PATH,
-                                  # wires shell completion into ~/.zshrc or ~/.bashrc
-exec "$SHELL" -l                  # reload so completion + PATH take effect
-endy doctor                       # confirm everything is wired up
-endy start --clean                # create the manager tmux session
-endy spawn opencode -- "say hi"   # smoke-test the spawn pipeline
-endy watch list                   # see your task land
+./scripts/install.sh --yes
+exec "$SHELL" -l
+endy doctor
 ```
 
-If `endy` is not found after install, `~/.local/bin` is not on your `PATH` — the install warning tells you the line to add. See [Install](#install) below for the long-form, opt-in walk-through.
-
----
-
-## What endy is and isn't
-
-**Is:**
-- A thin orchestration layer over four coding-agent CLIs.
-- A persistent monitor for long-running tasks: every spawn opens its own tmux window AND writes a tee'd log file, so you can detach, attach from another machine, follow a task on your phone, kill it, or resume its conversation later.
-- A delegation primitive that any of the four agents can invoke from their own bash tool: `endy spawn <agent> -- "<prompt>"`. The result is auditable in `.logs/` and the live tmux window.
-- Hybrid bash by default; an MCP shim path is present but commented out (see `codex/config.snippet.toml`). Hermes ships its own MCP server (`hermes mcp serve`) — flip on directly if you want.
-
-**Is not:**
-- A replacement CLI for the agents. You still run `codex`, `opencode`, `cmd`, `hermes` directly when you want.
-- A SaaS. Everything runs on your own machine. Phone access is via Tailscale, never public internet.
-- A model router. Each CLI keeps its own provider/model selection.
-
----
-
-## Quick start for managers
+If you already cloned the repo, just run:
 
 ```bash
-endy start --clean                 # create the manager tmux session
-tmux attach -t endy                # enter the session later
-tmux select-window -t endy:tree    # see active work grouped by orchestrator + cwd
-tmux select-window -t endy:watch   # open the interactive task browser
+cd /path/to/endy
+./scripts/install.sh --yes
+exec "$SHELL" -l
+endy doctor
 ```
 
-The default session layout is:
+The installer is idempotent. It creates the needed config directories, links
+`bin/endy` into `~/.local/bin/endy`, adds `~/.local/bin` to your shell rc file
+when needed, installs completion, and backs up existing files before replacing
+them.
+
+You do not need every agent installed. `endy doctor` only requires `python3`,
+`tmux`, and at least one supported agent CLI.
+
+## First Run
+
+From any project directory:
+
+```bash
+cd ~/work/my-project
+endy start --clean
+endy spawn <agent> -- "Say ENDY_OK and exit."
+endy watch list
+```
+
+Replace `<agent>` with one installed agent, for example `codex`, `opencode`,
+`cmd`, or `hermes`.
+
+What happens:
+
+- `endy start` creates a tmux session for the current directory, usually
+  `endy-my-project`.
+- The session opens `orchestrator`, `watch`, `docs`, and `tree` windows.
+- Tasks spawned from this directory write logs to `.logs/per-dir/<session>/`.
+- `endy watch list` shows status, agent, directory, runtime, and the latest
+  useful output.
+
+Attach later:
+
+```bash
+tmux attach -t endy-my-project
+```
+
+Stop this project session:
+
+```bash
+endy stop
+```
+
+## Session Modes
+
+| Command | Scope | Use it for |
+|---|---|---|
+| `endy start` | current directory | normal work in one repo |
+| `endy overview` | all endy sessions | global dashboard across projects |
+
+Common lifecycle commands:
+
+```bash
+endy start --clean          # refresh this project's manager
+endy overview --clean       # refresh the global all-session view
+endy stop                   # stop this project's session
+endy stop --all             # stop every endy session
+```
+
+## Daily Commands
+
+| Goal | Command |
+|---|---|
+| Spawn a long task | `endy spawn opencode -- "write tests for src/foo"` |
+| Ask a quick blocking question | `endy ask opencode "summarize this repo"` |
+| See active tasks | `endy watch tree` |
+| Browse tasks interactively | `endy watch browse` |
+| See every project | `endy watch list --overview` |
+| Follow one log in this terminal | `endy watch log <id>` |
+| Open a follow window in tmux | `endy watch follow <id>` |
+| Continue a task | `endy watch followup <id> -- "now fix the failing test"` |
+| Open an interactive chat | `endy watch chat <id>` |
+| Kill a stuck task | `endy watch kill <id>` |
+
+Task ids accept unique prefixes.
+
+## Which Agent To Use
+
+| Agent | Best for | Example |
+|---|---|---|
+| `opencode` | fast implementation, refactors, tests | `endy spawn opencode -- "add parser tests"` |
+| `cmd` | Kimi-backed coding and taste review | `endy spawn cmd -- "polish this API"` |
+| `codex` | long-context planning and orchestration | `endy spawn codex -- "review this design"` |
+| `hermes` | Nous/Hermes workflows and tool-heavy agent work | `endy spawn hermes -- "investigate this flow"` |
+
+Install and authenticate only the agents you use. `endy doctor` shows what is
+available.
+
+## What `endy start` Creates
 
 | Window | Purpose |
-|--------|---------|
-| `0 orchestrator` | Main Codex orchestrator, with `ENDY_ORCHESTRATOR=orchestrator` and `ENDY_ORCHESTRATOR_AGENT=codex` exported. |
-| `1 watch` | `endy watch browse`, the interactive picker for active tasks/chats. |
-| `2 docs` | README + NEXT_STEPS opened in `less`. |
-| `3 tree` | Auto-refreshing `endy watch tree` grouped by orchestrator, then directory. |
+|---|---|
+| `orchestrator` | your main agent shell, usually Codex |
+| `watch` | interactive task browser |
+| `docs` | README and NEXT_STEPS |
+| `tree` | auto-refreshing task tree |
 
-Daily loop:
+Useful tmux keys:
+
+- `Ctrl-b w` - window picker
+- `Ctrl-b n` / `Ctrl-b p` - next/previous window
+- `Ctrl-b d` - detach
+- `Ctrl-b &` - kill current window
+
+## Logs And Task Files
+
+Each task writes:
+
+- `task-<id>.prompt.md` - prompt sent to the agent
+- `task-<id>.meta` - agent, cwd, tmux window, parent task, resume id
+- `task-<id>.log` - stdout/stderr plus `ENDY_EXIT=<n>`
+
+Locations:
+
+- per-project: `.logs/per-dir/<session>/`
+- global overview: `.logs/`
+
+These files are the source of truth for the CLI, dashboard, and followups.
+
+## Web Dashboard
 
 ```bash
-endy watch tree                         # what is active, grouped by owner + directory
-endy watch browse                       # pick a task visually
-endy watch browse --cwd ~/work/payments # focus one repo
-endy watch browse --orch mobile         # focus one orchestrator/workstream
-endy watch chat <id>                    # open a typed follow-up terminal
-endy watch follow <id>                  # watch logs without disturbing the agent
-endy watch kill-all --cwd ~/work/foo    # close all task/chat/follow windows for a repo
+endy overview --clean
+endy web
 ```
 
-In `browse`, press `Enter` to open chat and switch to it, `Ctrl-o` to open chat in the background while staying in browse, and `Ctrl-f` to open a live log-follow window.
-
----
-
-## Prerequisites
-
-| Tool | Why | Install |
-|------|-----|---------|
-| `tmux` ≥ 3.0 | Session/window/log persistence | `brew install tmux` |
-| `bash` ≥ 3.2 | All scripts portable to the macOS-default bash | already on macOS |
-| `python3` ≥ 3.10 | Web dashboard (`endy web`) | already on macOS |
-| `fzf` ≥ 0.50 | `endy watch browse` interactive picker | `brew install fzf` |
-| `pbcopy` (macOS) / `wl-copy` / `xclip` | `^Y` clipboard binding in `browse` | macOS has it built-in |
-| `sqlite3` | `endy watch followup` opencode-session harvest | already on macOS |
-| `tailscale` | Remote access from phone | `brew install tailscale` |
-| At least one of: `codex`, `opencode`, `cmd`, `hermes` | The actual coding work | see each project's docs |
-
-`endy doctor` checks all of the above and tells you what's missing.
-
----
-
-## Install
+Open the printed URL. By default, endy binds to your Tailscale IP when
+available, otherwise localhost. For shared networks, set a token:
 
 ```bash
-git clone <this-repo> ~/Downloads/endy
-cd ~/Downloads/endy
-./scripts/install.sh
+export ENDY_WEB_TOKEN="choose-a-token"
+endy web
 ```
 
-`install.sh` is **idempotent** — re-runnable without harm. It:
+Clients can pass `?token=...` or the `X-Endy-Token` header.
 
-1. **Symlinks Codex agent personas** in `codex/agents/*.toml` → `~/.codex/agents/`.
-2. **Symlinks the Codex skill** `codex/skills/endy-delegate/` → `~/.codex/skills/endy-delegate/` so Codex auto-loads delegation guidance.
-3. **Symlinks OpenCode agent personas** `opencode/agents/*.md` → `~/.config/opencode/agents/`.
-4. **Symlinks CommandCode agents** `commandcode/agents/*.md` → `~/.commandcode/agents/`.
-5. **Symlinks `AGENTS.md`** to `~/.codex/AGENTS.md` and `~/.commandcode/AGENTS.md` so Codex and `cmd` auto-load endy stack context on every session.
-6. **Symlinks `bin/endy`** to `~/.local/bin/endy`. If `~/.local/bin` is not on your `PATH`, you get a warning telling you what to add to `~/.zshrc`/`~/.bashrc`.
-7. **Hooks shell completion** by appending a `source` line for `scripts/endy-completion.sh` into `~/.zshrc` (with `bashcompinit`) or `~/.bashrc`, gated by an idempotent marker block.
-8. **Appends an `[mcp_servers.*]` block** (currently commented out — bash mode is active) to `~/.codex/config.toml` between markers so the change is reversible.
+## Agent Setup
 
-Pass `--yes` (or `-y`) to skip the interactive confirmation — handy for CI and quickstart pipes.
-
-Existing files at the target paths are renamed `*.bak.<unix-timestamp>` rather than overwritten.
-
-After install:
+Minimal setup examples:
 
 ```bash
-endy doctor                  # confirm tmux + each agent CLI + AGENTS.md + tmux session
+codex                 # login if prompted
+opencode auth login
+cmd login
+hermes status
 ```
 
----
+Important notes:
 
-## Configure
+- `cmd` has no CLI `--model` flag. Set the model inside `cmd` with `/model`.
+- `opencode` needs a working directory. endy passes it automatically.
+- `hermes` uses `hermes chat -Q --accept-hooks` under the hood.
+- Missing optional agents do not block the install.
 
-Each agent CLI needs its own one-time setup before endy can drive it.
-
-### Codex (OpenAI)
+## Command Reference
 
 ```bash
-codex                        # first run prompts for login if needed
+endy install
+endy doctor
+endy start [--clean] [--no-attach] [--serve-opencode] [--logs]
+endy overview [--clean] [--no-attach]
+endy stop [--all|--session <name>]
+endy spawn <agent> [--supervised] [--prompt-file <file>] -- "<prompt>"
+endy ask <agent> "<prompt>"
+endy chat <agent>
+endy watch list [--overview]
+endy watch tree [--all] [--overview]
+endy watch browse [--all] [--overview] [--cwd <dir>] [--orch <name>]
+endy watch log <id>
+endy watch follow <id>
+endy watch view <id>
+endy watch chat <id>
+endy watch followup <id> -- "<prompt>"
+endy watch kill <id>
+endy watch kill-all --cwd <dir>
+endy web [--localhost|--host <ip>] [--port <n>]
 ```
 
-Codex reads `~/.codex/config.toml` — your existing file plus the appended endy block. Default model `gpt-5.5` with `xhigh` reasoning is fine; change in the file if you prefer.
+Run `endy help` for the current CLI help and `endy help <agent>` for focused
+agent notes.
 
-### OpenCode
+## Install Details
 
-```bash
-opencode auth login          # interactive auth flow with whichever provider you use
+`./scripts/install.sh --yes`:
+
+- symlinks `bin/endy` into `~/.local/bin/endy`
+- adds `~/.local/bin` to your shell rc file if needed
+- installs shell completion
+- symlinks bundled Codex, OpenCode, and CommandCode personas
+- symlinks the Codex `endy-delegate` skill
+- symlinks `AGENTS.md` for Codex and CommandCode
+- appends or refreshes the managed endy block in `~/.codex/config.toml`
+
+Existing files are backed up as `*.bak.<timestamp>`.
+
+## Project Layout
+
+```text
+bin/endy                         main CLI
+scripts/start.sh                 tmux manager session bootstrap
+scripts/spawn-long-task.sh       detached agent task runner
+scripts/spawn-chat.sh            interactive chat runner
+scripts/endy-watch.sh            task list, tree, browse, follow, kill
+scripts/lib/session.sh           per-directory session naming
+scripts/lib/status.sh            bash status heuristic
+web/server.py                    dashboard server
+codex/agents/                    Codex personas
+codex/skills/endy-delegate/      Codex skill for endy delegation
+opencode/agents/                 OpenCode personas
+commandcode/agents/              CommandCode personas
+NEXT_STEPS.md                    implementation handoff and open work
 ```
 
 OpenCode supports many providers (Anthropic, OpenAI, OpenRouter, Nous, Ollama-cloud, etc.). The default agent `build` uses model `big-pickle` which works without per-call config.
@@ -612,25 +699,15 @@ Currently **not in the active stack** — slot reserved. The `claude` agent type
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
-|---------|------------|
-| `endy: command not found` | `~/.local/bin` not on PATH. Run `endy install` and follow the warning. |
-| `tmux session 'endy' not running` | Run `endy start`. |
-| `endy watch follow <id>` says `task <id> has no log yet (still starting up)` | Race during agent boot. Try again in 5 seconds, or check `endy watch view <id>` for the meta. |
-| `endy watch browse` errors `unknown action: reload-preview` | fzf binding bug — already fixed in current code (was `reload-preview`, should be `refresh-preview`). Pull latest. |
-| Task stuck in `PENDING` forever | The agent's CLI is hung before producing output. Check it manually: `tmux attach -t endy` then navigate to its window with `Ctrl-b w`. Often: missing auth (`cmd login`, `opencode auth login`). |
-| Task shows `DONE-ERR` | Look at `endy watch view <id>` and grep for `Error:` / `Warning: Reached maximum` etc. The heuristic flagged a problem despite exit 0. Common causes: max-turns hit, auth issue, model mismatch. |
-| Task shows `ABANDONED` | tmux window for it is gone or its pane is dead, with no `ENDY_EXIT=` marker. Likely the tmux session was killed mid-run, the agent auto-updated/restarted outside the wrapper, or the agent crashed before `ENDY_EXIT` could be written. The log up to that point is preserved. |
-| `endy watch attach -r` won't let you switch windows | Read-only mode blocks ALL keys including `Ctrl-b`. Drop `-r` (the default in `endy watch attach`) or use `--strict` only when you really mean it. |
-| Web dashboard says "no tasks" but `endy watch list` shows them | Check the web server's logs. Most likely it bound to a different `LOG_DIR` (the script auto-resolves via `__file__`'s parent). |
-| `endy spawn cmd --model X` ignored | cmd has no `--model` flag. Set globally: `cmd /model X`. |
-| `endy spawn cmd --persona X` ignored | cmd has no `--agent` flag. Personas via `/agents` interactively only. Use ad-hoc inline prompts. |
-| Spawned cmd task has empty log + `Reached maximum turns` warning | `--max-turns` defaults to 200 but you can raise it. For research-heavy tasks, **prefer opencode** — its default agent finishes the same work in fewer turns. |
+| Symptom | Fix |
+|---|---|
+| `endy: command not found` | Run `exec "$SHELL" -l`; if needed, add `~/.local/bin` to `PATH` |
+| `tmux session '<name>' not running` | Run `endy start` or `endy overview` |
+| no tasks in picker | Use `endy watch browse --all` |
+| task stuck in `PENDING` | Attach with `tmux attach -t <session>` and inspect the task window |
+| task is `DONE-ERR` | Open `endy watch view <id>` and inspect the warning or error |
+| `cmd --model` ignored | Set the model inside `cmd` with `/model` |
 
----
+## Roadmap
 
-## Roadmap and open work
-
-This README is the operator's manual. The companion file [NEXT_STEPS.md](NEXT_STEPS.md) is the implementing-agent's brief — it lists what's done, what's partially done, and what's open with concrete acceptance criteria for each.
-
-If you're an agent picking this up, **start there**.
+See `NEXT_STEPS.md` for current implementation notes and follow-up work.

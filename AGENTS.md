@@ -55,8 +55,12 @@ Personas refuse out-of-scope work by design. If a task doesn't fit any persona, 
 
 A few endy commands worth knowing — they save time when debugging or onboarding:
 
-- `endy doctor` — checks tmux + every agent CLI + `AGENTS.md` symlinks + the cmd model setting (`~/.commandcode/config.json`). A blank cmd model is a common cause of silent spawn hangs.
+- `endy doctor` — checks tmux + every agent CLI + `AGENTS.md` symlinks + the cmd model setting (`~/.commandcode/config.json`). A blank cmd model is a common cause of silent spawn hangs. Also lists every running `endy*` tmux session so you can see the per-dir landscape.
 - `endy help <agent>` — prints the per-CLI gotcha section straight out of `README.md`. Agents: `opencode`, `cmd`, `hermes`, `claude`, `tmux`. Use this before guessing why a flag is being ignored.
+- `endy start` (per-directory by default) — spins up a tmux session named `endy-<basename>` (with a 4-hex-char hash suffix on collision/reserved names) scoped to `$cwd`. Logs land in `.logs/per-dir/<session>/`. Tasks spawned from this cwd, or with their meta `cwd` under it, show up in this session's watch picker only.
+- `endy overview` — the GLOBAL aggregator, equivalent to the original single-session behavior. Forces `ENDY_SESSION=endy` and `LOG_DIR=$ENDY_ROOT/.logs`. Watch/list/tree/browse here all support `--overview` to scan every per-dir session in addition to the global one.
+- `endy stop [--all|--session <name>]` — `--all` kills every `endy*` tmux session; `--session` targets a specific one; bare `endy stop` kills the per-dir session for the current cwd.
+- Per-dir overrides for any subcommand: set `ENDY_SESSION` and `ENDY_LOG_DIR` in env, or pass `--session <name> --log-dir <path>` to `spawn-long-task.sh` / `spawn-chat.sh`. The web dashboard auto-discovers every per-dir scope on startup.
 - Shell completion — `scripts/endy-completion.sh` covers subcommands, agents, watch ops, and help topics in both bash and zsh. `endy install` wires it in via a marked block in your rc file; pass `--yes` for non-interactive installs (CI/quickstart).
 - Web dashboard — `endy web` defaults to a Tailnet-only bind (no public exposure). For shared Tailnets, set `ENDY_WEB_TOKEN=<value>` before launch; clients must then send `X-Endy-Token: <value>` or `?token=<value>`. Persona dropdowns auto-populate from `opencode/agents/`, `commandcode/agents/`, and `codex/agents/` in this repo.
 - Status heuristic — `scripts/lib/status.sh` is the single bash source of truth for `RUN/PENDING/DONE/DONE-ERR/FAIL/ABANDONED/CHAT`. `endy-watch.sh` and `_endy-preview.sh` both source it; web/server.py and check-long-task.sh keep parallel copies — patch them all when you add a new error pattern.
@@ -64,7 +68,10 @@ A few endy commands worth knowing — they save time when debugging or onboardin
 ## File and directory conventions
 
 - This project is at `$HOME/Downloads/endy/` (or wherever you cloned it). The `endy` CLI is at `bin/endy`.
-- Long-task logs and metadata: `endy/.logs/task-<timestamp>-<short>.{log,meta,prompt.md}`.
+- Long-task logs and metadata:
+  - per-dir mode: `endy/.logs/per-dir/<session>/task-<timestamp>-<short>.{log,meta,prompt.md}`
+  - overview/global mode: `endy/.logs/task-<timestamp>-<short>.{log,meta,prompt.md}`
+- Each per-dir log dir holds a `.cwd` marker file recording which absolute path owns the session — used to detect collisions on second `endy start` from another cwd whose basename matches.
 - Backups of any file `install.sh` modifies: `<original>.bak.<unix-timestamp>`.
 - Don't write here from inside a delegated task unless explicitly asked. Stick to the cwd you were given.
 
