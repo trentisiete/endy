@@ -111,8 +111,12 @@ BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
   tmux new-window -t "$SESSION" -n docs -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "clear
 printf '\033[1;36mendy docs\033[0m\n'
-printf '\033[1;33mREADME.md and NEXT_STEPS.md. q exits less and leaves a shell.\033[0m\n\n'
-less -R README.md NEXT_STEPS.md
+printf '\033[1;33mREADME.md and NEXT_STEPS.md (if present). q exits less and leaves a shell.\033[0m\n\n'
+files=()
+for f in README.md NEXT_STEPS.md; do
+  [[ -f "$f" ]] && files+=("$f")
+done
+less -R "${files[@]}"
 BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 ")"
 }

@@ -33,20 +33,22 @@ sudo apt-get update
 sudo apt-get install -y python3 tmux fzf
 ```
 
-Then install endy:
+Then install endy. Two ways:
+
+**Via npm (recommended):**
 
 ```bash
-git clone https://github.com/trentisiete/endy.git ~/Downloads/endy
-cd ~/Downloads/endy
-./scripts/install.sh --yes
+npm install -g @noetiklab/endy
+endy install            # finishes setup (symlinks, completion, PATH)
 exec "$SHELL" -l
 endy doctor
 ```
 
-If you already cloned the repo, just run:
+**From source:**
 
 ```bash
-cd /path/to/endy
+git clone https://github.com/trentisiete/endy.git
+cd endy
 ./scripts/install.sh --yes
 exec "$SHELL" -l
 endy doctor

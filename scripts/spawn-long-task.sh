@@ -102,7 +102,7 @@ orchestrator="${orchestrator:-${origin_window:-manual}}"
 
 mkdir -p "$LOG_DIR"
 
-TASK_ID="$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 2)"
+TASK_ID="$(date +%Y%m%d-%H%M%S)-$(_endy_rand_hex4)"
 PROMPT_PATH="${LOG_DIR}/task-${TASK_ID}.prompt.md"
 LOG_PATH="${LOG_DIR}/task-${TASK_ID}.log"
 META_PATH="${LOG_DIR}/task-${TASK_ID}.meta"

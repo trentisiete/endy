@@ -1,0 +1,27 @@
+{
+  "name": "@noetiklab/endy",
+  "version": "0.1.0",
+  "description": "Multi-agent control plane for coding CLIs (codex, opencode, cmd, hermes) — tmux-based orchestration, web dashboard.",
+  "bin": { "endy": "bin/endy" },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "codex/",
+    "opencode/",
+    "commandcode/",
+    "mcp-shims/",
+    "web/",
+    "AGENTS.md",
+    "README.md"
+  ],
+  "os": ["darwin", "linux"],
+  "engines": { "node": ">=18" },
+  "homepage": "https://github.com/trentisiete/endy",
+  "repository": { "type": "git", "url": "git+https://github.com/trentisiete/endy.git" },
+  "bugs": { "url": "https://github.com/trentisiete/endy/issues" },
+  "keywords": ["tmux", "multi-agent", "codex", "opencode", "claude", "agent-orchestration"],
+  "license": "MIT"
+}
