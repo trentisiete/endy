@@ -41,6 +41,10 @@ OPENCODE_DIR="${HOME}/.config/opencode"
 CMDCODE_DIR="${HOME}/.commandcode"
 LOCAL_BIN="${HOME}/.local/bin"
 
+# Pre-create the per-dir log root so first `endy start` from any cwd has a
+# place to land its logs without racing on directory creation.
+mkdir -p "${ENDY_ROOT}/.logs/per-dir"
+
 CODEX_CONFIG="${CODEX_DIR}/config.toml"
 MARKER_BEGIN="# >>> endy v0.1 (managed by ${ENDY_ROOT}/scripts/install.sh)"
 MARKER_END="# <<< endy v0.1"
@@ -264,7 +268,8 @@ $(ok "install complete")
 
 You now have a single CLI:  endy
   endy doctor                  → check every agent's install/auth state
-  endy start                   → launch the tmux gateway
+  endy start                   → launch this cwd's per-dir tmux gateway
+  endy overview                → launch the global all-session overview
   endy watch list              → see all tasks (status / agent / cwd / runtime / last)
   endy spawn opencode -- "..."  → fire a long detached task
   endy codex --root            → start codex from endy project root with full context

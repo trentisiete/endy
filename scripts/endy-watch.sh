@@ -62,9 +62,23 @@
 
 set -u
 
-SESSION="endy"
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
+
+# Per-command --overview / --all-sessions flag toggles aggregator mode where
+# we scan every per-dir log dir AND the global one. Subcommands set
+# AGGREGATE=1 then call _aggregate_log_dirs to iterate.
+AGGREGATE=0
+_aggregate_log_dirs() {
+  if [[ "$AGGREGATE" == "1" ]]; then
+    _endy_list_per_dir_log_dirs
+  else
+    printf '%s\n' "$LOG_DIR"
+  fi
+}
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RST=$'\033[0m'
@@ -97,18 +111,41 @@ strip_ansi() {
   perl -pe 's/\e\][^\a]*(?:\a|\e\\)//g; s/\eP.*?\e\\//g; s/\e_.*?\e\\//g; s/\e\[[0-9;?<>]*[ -\/]*[@-~]//g; s/\e[()][A-Za-z0-9]//g; s/\e[=>]//g; s/\e\\//g; s/\e//g'
 }
 
+# List every meta file across the active scope (one dir in default scope,
+# all per-dir dirs + global in --overview/aggregate scope). Newline-separated.
+_iter_meta_files() {
+  shopt -s nullglob
+  local dir m
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for m in "${dir}"/task-*.meta; do
+      [[ -f "$m" ]] && printf '%s\n' "$m"
+    done
+  done < <(_aggregate_log_dirs)
+  shopt -u nullglob
+}
+
+# Locate the meta file for a given task id, searching the active scope.
+_meta_for_id() {
+  local id="$1"
+  local m
+  while IFS= read -r m; do
+    [[ "$(basename "$m")" == "task-${id}.meta" ]] && { printf '%s\n' "$m"; return 0; }
+  done < <(_iter_meta_files)
+  return 1
+}
+
 # Resolve a task id prefix to a full task id (errors if 0 or >1 matches).
 resolve_id() {
   local prefix="$1"
   local matches=()
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
-    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+  local m id
+  while IFS= read -r m; do
+    id="$(basename "$m" .meta | sed 's/^task-//')"
     if [[ "$id" == "$prefix"* || "$id" == *"$prefix"* ]]; then
       matches+=("$id")
     fi
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
   case "${#matches[@]}" in
     0) echo "no task matching '$prefix'" >&2; return 1 ;;
     1) printf '%s\n' "${matches[0]}" ;;
@@ -135,7 +172,13 @@ meta_field() {
 
 task_meta_path() {
   local id="$1"
-  printf '%s/task-%s.meta\n' "$LOG_DIR" "$id"
+  local found
+  found="$(_meta_for_id "$id" 2>/dev/null)"
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "$found"
+  else
+    printf '%s/task-%s.meta\n' "$LOG_DIR" "$id"
+  fi
 }
 
 task_prompt_path() {
@@ -325,7 +368,8 @@ cmd_list() {
     case "$1" in
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
-      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+      --overview|--all-sessions) AGGREGATE=1; shift ;;
+      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
@@ -339,8 +383,7 @@ cmd_list() {
   printf '%b%-22s %-9s %-13s %-14s %-9s %-16s %-30s %-7s %s%b\n' \
     "$C_DIM" "──────────────────────" "─────────" "─────────────" "──────────────" "─────────" "────────────────" "──────────────────────────────" "───────" "──────────" "$C_RST"
 
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
 
@@ -398,11 +441,14 @@ cmd_list() {
     printf '%b%-22s%b %b%-9s%b %-13s %b%-14s%b %b%-9s%b %-16s %-30s %-7s %s\n' \
       "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$parent_short" \
       "$C_MAG" "$orch_label" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$cwd_short" "$runtime" "$last"
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
 
   if [[ "$found" == "0" ]]; then
-    echo "(no tasks in ${LOG_DIR})"
+    if [[ "$AGGREGATE" == "1" ]]; then
+      echo "(no tasks across all sessions)"
+    else
+      echo "(no tasks in ${LOG_DIR})"
+    fi
   fi
 }
 
@@ -419,15 +465,15 @@ cmd_tree() {
       --all|-a) include_all=1; shift ;;
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
-      *) echo "usage: endy watch tree [--all] [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+      --overview|--all-sessions) AGGREGATE=1; shift ;;
+      *) echo "usage: endy watch tree [--all] [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
 
   local now; now="$(date +%s)"
   local rows=()
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
@@ -442,6 +488,9 @@ cmd_tree() {
     local orch; orch="$(task_orchestrator "$m")"
     local orch_label; orch_label="$(task_orchestrator_label "$m")"
     local model; model="$(model_label "$m" "$log" "$agent")"
+    local window; window="$(meta_field "$m" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local parent; parent="$(meta_field "$m" parent_task)"; parent="${parent:-—}"
@@ -459,13 +508,14 @@ cmd_tree() {
               | head -c 90)"
       [[ -z "$last" ]] && last="(empty)"
     fi
-    rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}")
-  done
-  shopt -u nullglob
+    rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${task_session}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}")
+  done < <(_iter_meta_files)
 
   if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
-      echo "(no tasks in ${LOG_DIR})"
+      [[ "$AGGREGATE" == "1" ]] && echo "(no tasks across all sessions)" || echo "(no tasks in ${LOG_DIR})"
+    elif [[ "$AGGREGATE" == "1" ]]; then
+      echo "(no active tasks; use 'endy watch tree --overview --all' to include finished tasks across sessions)"
     else
       echo "(no active tasks; use 'endy watch tree --all' to include finished tasks)"
     fi
@@ -473,19 +523,20 @@ cmd_tree() {
   fi
 
   local last_orch=""
-  local last_cwd=""
-  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 | while IFS=$'\t' read -r orch orch_label cwd id status agent model kind parent runtime last; do
+  local last_cwd_key=""
+  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 -k5,5 | while IFS=$'\t' read -r orch orch_label cwd task_session id status agent model kind parent runtime last; do
     if [[ "$orch" != "$last_orch" ]]; then
       [[ -n "$last_orch" ]] && printf '\n'
       printf '%bORCH%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_MAG$C_BOLD" "$orch_label" "$C_RST"
       last_orch="$orch"
-      last_cwd=""
+      last_cwd_key=""
     fi
-    if [[ "$cwd" != "$last_cwd" ]]; then
-      [[ -n "$last_cwd" ]] && printf '\n'
+    local cwd_key="${cwd}"$'\t'"${task_session}"
+    if [[ "$cwd_key" != "$last_cwd_key" ]]; then
+      [[ -n "$last_cwd_key" ]] && printf '\n'
       printf '  %bDIR%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_CYN" "$cwd" "$C_RST"
-      printf '    %btmux attach -t %s%b    # Ctrl-b w opens the window picker\n' "$C_DIM" "$SESSION" "$C_RST"
-      last_cwd="$cwd"
+      printf '    %btmux attach -t %s%b    # Ctrl-b w opens the window picker\n' "$C_DIM" "$task_session" "$C_RST"
+      last_cwd_key="$cwd_key"
     fi
     local sc; sc="$(status_color "$status")"
     if [[ "$parent" == "—" ]]; then
@@ -616,7 +667,8 @@ cmd_browse() {
       --all|-a) include_all=1; shift ;;
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
-      *) echo "usage: endy watch browse [--all] [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+      --overview|--all-sessions) AGGREGATE=1; shift ;;
+      *) echo "usage: endy watch browse [--all] [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
@@ -643,10 +695,9 @@ cmd_browse() {
   local C_RST=$'\033[0m' C_DIM=$'\033[2m' C_BOLD=$'\033[1m'
   local C_BLU=$'\033[34m' C_GRN=$'\033[32m' C_YLW=$'\033[33m' C_RED=$'\033[31m' C_GREY=$'\033[90m'
 
-  shopt -s nullglob
   local rows=()
   local now; now="$(date +%s)"
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local agent;       agent="$(meta_field "$m" agent)"
@@ -700,8 +751,7 @@ cmd_browse() {
       "$C_DIM" "$rt" "$C_RST" \
       "$C_DIM" "$cwd_short" "$C_RST" \
       "$relation")")
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
 
   if [[ ${#rows[@]} -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
@@ -758,8 +808,7 @@ cmd_panel() {
   [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]] && include_all=1
 
   local entries=()
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
@@ -769,8 +818,7 @@ cmd_panel() {
         [[ "$include_all" == "1" ]] || continue ;;
     esac
     entries+=("${id}|${log}")
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
 
   if [[ "${#entries[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
@@ -1006,7 +1054,7 @@ cmd_followup() {
   fi
 
   local id; id="$(resolve_id "$prefix")" || exit 1
-  local meta="${LOG_DIR}/task-${id}.meta"
+  local meta; meta="$(task_meta_path "$id")"
   local log; log="$(task_log_path "$meta" "$id")"
   [[ -f "$meta" ]] || { echo "no meta for $id" >&2; exit 1; }
 
@@ -1105,8 +1153,7 @@ cmd_kill_all() {
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
 
   local closed=0 matched=0
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local agent; agent="$(meta_field "$m" agent)"
     local cwd; cwd="$(meta_field "$m" cwd)"
@@ -1133,14 +1180,16 @@ cmd_kill_all() {
     fi
 
     local window_name="${window##*:}"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window_name" ]] && task_session="$SESSION"
     local exists=0
-    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
+    if tmux list-windows -t "$task_session" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
       exists=1
     fi
 
     local follow_window="follow-${id}"
     local follow_exists=0
-    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$follow_window"; then
+    if tmux list-windows -t "$task_session" -F '#W' 2>/dev/null | grep -qx "$follow_window"; then
       follow_exists=1
     fi
 
@@ -1148,21 +1197,20 @@ cmd_kill_all() {
 
     echo "closing $id  agent=${agent:-?}  orch=${orch:-?}  cwd=${cwd:-?}"
     echo "  tmux kill-window -t ${window}"
-    [[ "$follow_exists" == "1" ]] && echo "  tmux kill-window -t ${SESSION}:${follow_window}"
+    [[ "$follow_exists" == "1" ]] && echo "  tmux kill-window -t ${task_session}:${follow_window}"
 
     if [[ "$dry_run" == "1" ]]; then
       continue
     fi
 
     [[ "$exists" == "1" ]] && tmux kill-window -t "$window" 2>/dev/null || true
-    [[ "$follow_exists" == "1" ]] && tmux kill-window -t "${SESSION}:${follow_window}" 2>/dev/null || true
+    [[ "$follow_exists" == "1" ]] && tmux kill-window -t "${task_session}:${follow_window}" 2>/dev/null || true
 
     if [[ -f "$log" ]] && ! grep -qE '^ENDY_EXIT=' "$log" 2>/dev/null; then
       printf '\n[endy-watch] killed by kill-all\nENDY_EXIT=130\n' >> "$log"
     fi
     closed=$((closed + 1))
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
 
   echo
   echo "matched=${matched}"
@@ -1179,8 +1227,7 @@ cmd_gc() {
   local dry_run=0
   [[ "${1:-}" == "--dry-run" ]] && dry_run=1
   local cleaned=0
-  shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
@@ -1193,8 +1240,7 @@ cmd_gc() {
       [[ "$dry_run" == "1" ]] && echo "[dry] kill-window $window" || tmux kill-window -t "$window" 2>/dev/null
       cleaned=$((cleaned + 1))
     fi
-  done
-  shopt -u nullglob
+  done < <(_iter_meta_files)
   echo "gc: cleaned $cleaned dead window(s)"
 }
 

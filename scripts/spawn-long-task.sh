@@ -20,7 +20,7 @@
 # Exit code:
 #   0  task spawned (says nothing about success of the task itself)
 #   2  bad arguments
-#   3  tmux session 'endy' not running — run scripts/start.sh first
+#   3  target tmux session not running — run `endy start` or `endy overview` first
 #
 # Implementation note: the prompt is persisted to a file and the inner shell
 # command reads it back via "$(cat <file>)" at runtime, so the agent
@@ -32,8 +32,10 @@
 set -euo pipefail
 
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
-SESSION="endy"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 
 agent=""
 persona=""
@@ -70,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     --parent-task)  parent_task="$2";  shift 2 ;;
     --orchestrator) orchestrator="$2"; shift 2 ;;
     --orchestrator-agent) orchestrator_agent="$2"; shift 2 ;;
+    --session)      SESSION="$2";      shift 2 ;;
+    --log-dir)      LOG_DIR="$2";      shift 2 ;;
     -h|--help)
       sed -n '2,28p' "$0"; exit 0 ;;
     *)
@@ -82,7 +86,7 @@ done
   { echo "--prompt or --prompt-file required" >&2; exit 2; }
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "tmux session '$SESSION' not running — run ${ENDY_ROOT}/scripts/start.sh first" >&2
+  echo "tmux session '$SESSION' not running — run 'endy start' first (or 'endy overview' for the global session)" >&2
   exit 3
 fi
 

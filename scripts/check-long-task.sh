@@ -10,8 +10,33 @@
 set -euo pipefail
 
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="${ENDY_ROOT}/.logs"
+# shellcheck source=lib/session.sh
+. "${ENDY_ROOT}/scripts/lib/session.sh"
+SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
+LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 TAIL_N=50
+
+# In --list mode we scan every per-dir scope unless the user explicitly
+# scoped via ENDY_LOG_DIR. _list_log_dirs() prints one per line.
+_list_log_dirs() {
+  if [[ -n "${ENDY_LOG_DIR:-}" ]]; then
+    printf '%s\n' "$ENDY_LOG_DIR"
+  else
+    _endy_list_per_dir_log_dirs
+  fi
+}
+
+# Locate a task's meta file across scopes.
+_find_meta() {
+  local id="$1" d
+  while IFS= read -r d; do
+    if [[ -f "${d}/task-${id}.meta" ]]; then
+      printf '%s\n' "${d}/task-${id}.meta"
+      return 0
+    fi
+  done < <(_list_log_dirs)
+  return 1
+}
 
 # Heuristic: even when exit==0, scan for common error markers. CLI agents
 # (opencode in particular) often print errors and still exit 0. The first
@@ -39,12 +64,13 @@ tmux_window_alive() {
 
 if [[ "${1:-}" == "--list" ]]; then
   shopt -s nullglob
-  for m in "${LOG_DIR}"/task-*.meta; do
+  while IFS= read -r _scan_dir; do
+    for m in "${_scan_dir}"/task-*.meta; do
     id="$(basename "$m" .meta | sed 's/^task-//')"
     spawned="$(meta_field "$m" spawned_at)"
     agent="$(meta_field "$m" agent)"
     kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
-    log="$(meta_field "$m" log)"; log="${log:-${LOG_DIR}/task-${id}.log}"
+    log="$(meta_field "$m" log)"; log="${log:-${_scan_dir}/task-${id}.log}"
     window="$(meta_field "$m" window)"
     if [[ ! -f "$log" ]]; then
       if [[ -n "$window" ]] && ! tmux_window_alive "$window"; then
@@ -71,7 +97,10 @@ if [[ "${1:-}" == "--list" ]]; then
       st="RUNNING"
     fi
     printf '%-30s  %-8s  %-10s  %s\n' "$id" "$st" "$agent" "$spawned"
-  done
+    done
+  done < <(_list_log_dirs)
+  unset _scan_dir
+  shopt -u nullglob
   exit 0
 fi
 
@@ -86,6 +115,14 @@ done
 
 META="${LOG_DIR}/task-${TASK_ID}.meta"
 LOG="${LOG_DIR}/task-${TASK_ID}.log"
+# Fallback: search every per-dir scope if not in our default LOG_DIR.
+if [[ ! -f "$META" ]]; then
+  if _found="$(_find_meta "$TASK_ID" 2>/dev/null)"; then
+    META="$_found"
+    LOG="${_found%.meta}.log"
+  fi
+  unset _found
+fi
 KIND="spawn"
 if [[ -f "$META" ]]; then
   meta_log="$(meta_field "$META" log)"
