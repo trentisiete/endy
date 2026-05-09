@@ -33,6 +33,9 @@
 #                                              Wraps scripts/spawn-long-task.sh; passes
 #                                              --full-auto by default unless --supervised.
 #   endy ask <agent> [opts] <prompt>           Short blocking call. Output to stdout.
+#                                              Note: 'ask opencode' may be slow for non-coding
+#                                              prompts (full agent loop). Prefer 'ask cmd' or
+#                                              wrap in bash -c for shell commands.
 #   endy chat <agent> [opts]                   Interactive agent in a tmux window.
 #
 # Watching
@@ -189,7 +192,7 @@ endy help <agent>        Show per-CLI gotchas for an agent
                          agents: opencode, cmd, hermes, claude, tmux
 EOF
       ;;
-    *) die "no help topic '$1' — try: endy help <opencode|cmd|hermes|claude|tmux>" ;;
+    *) echo "endy: no help topic '$1' — try: endy help <opencode|cmd|hermes|claude|tmux>" >&2; exit 2 ;;
   esac
 }
 
@@ -253,7 +256,11 @@ cmd_stop() {
   if [[ "$stop_all" == "1" ]]; then
     local s any=0
     for s in $(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)'); do
-      tmux kill-session -t "$s" 2>/dev/null && { echo "stopped: $s"; any=1; }
+      if tmux kill-session -t "$s" 2>/dev/null; then
+        echo "stopped: $s"
+        _endy_purge_empty_log_dir "$s"
+        any=1
+      fi
     done
     [[ "$any" == "0" ]] && echo "no endy* sessions running."
     return 0
@@ -262,6 +269,7 @@ cmd_stop() {
   if tmux has-session -t "$target" 2>/dev/null; then
     tmux kill-session -t "$target"
     echo "endy session '$target' stopped."
+    _endy_purge_empty_log_dir "$target"
   else
     echo "endy session '$target' not running."
   fi

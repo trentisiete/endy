@@ -178,6 +178,38 @@ _endy_worktree_root() {
   (cd "$p" 2>/dev/null && pwd) || printf '%s' "$p"
 }
 
+# _endy_purge_empty_log_dir <session>
+# After a session is killed, remove its per-dir log directory if it contains
+# no task logs or other valuable data. Never touches the global .logs dir.
+_endy_purge_empty_log_dir() {
+  local session="$1"
+  local dir; dir="$(_endy_log_dir "$session")"
+
+  # Never touch the global overview log dir.
+  [[ "$dir" == "${ENDY_ROOT}/.logs" ]] && return 0
+
+  # Directory might not exist (already cleaned, or never created).
+  [[ -d "$dir" ]] || return 0
+
+  # Refuse to purge if task log/meta files exist.
+  if [[ -n "$(find "$dir" -maxdepth 1 \( -name 'task-*.log' -o -name 'task-*.meta' \) -print -quit)" ]]; then
+    printf '! kept .logs/per-dir/%s/ (has task logs)\n' "$session" >&2
+    return 0
+  fi
+
+  # Refuse if anything besides known transient artifacts is present.
+  if [[ -n "$(find "$dir" -mindepth 1 -maxdepth 1 \
+    ! -name '.cwd' \
+    ! -name 'opencode-serve.log' \
+    -print -quit)" ]]; then
+    printf '! kept .logs/per-dir/%s/ (has task logs)\n' "$session" >&2
+    return 0
+  fi
+
+  rm -rf "$dir"
+  printf '✓ purged log dir .logs/per-dir/%s/\n' "$session"
+}
+
 # _endy_sibling_worktrees [path]
 # Print every git worktree path other than the current one (newline-separated).
 # Empty output if not in a git repo.
