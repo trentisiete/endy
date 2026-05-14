@@ -43,6 +43,8 @@
 #   endy watch list                   Enriched status table.
 #   endy watch tree [--all]           Group tasks by orchestrator and working directory.
 #   endy watch dir <path>             Show tasks under one working directory.
+#   endy watch sessions               Per-session summary with task counts and live panes.
+#   endy watch agents                 Unified view: spawned tasks + live panes, all sessions.
 #   endy watch log <id>               Follow one task's log (less +F).
 #   endy watch chat <id>              Open an interactive chat for a task.
 #   endy watch attach [<id>]          Read-only attach, optionally focusing a task window.
@@ -52,6 +54,16 @@
 #   endy watch kill-all --cwd DIR     Close all task/chat/follow windows under a dir.
 #   endy watch purge <id>             Purge a task family from .logs/ and kill tmux windows.
 #                                     Aliases: delete, purge-session.
+#
+# Live agent panes (orchestrator-driven interactive agents)
+#   endy live open <name> <agent> [--cwd DIR] [--model M] [--persona P] [--full-auto]
+#   endy live send <name> <text>
+#   endy live send-file <name> <path>
+#   endy live capture <name> [--lines N]
+#   endy live clear <name>
+#   endy live close <name>
+#   endy live list
+#   endy live status
 #
 # Web dashboard
 #   endy web                          Start the web dashboard. Binds to your
@@ -544,6 +556,7 @@ case "${1:-help}" in
   spawn)    shift; cmd_spawn "$@" ;;
   ask)      shift; cmd_ask "$@" ;;
   chat)     shift; cmd_chat "$@" ;;
+  live)     shift; exec "${SCRIPTS}/live.sh" "$@" ;;
 
   codex)    shift; run_agent codex "$@" ;;
   opencode) shift; run_agent opencode "$@" ;;

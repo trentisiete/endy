@@ -13,7 +13,7 @@ scope="per-dir"
 tree_args=""
 if [[ "$SESSION" == "endy" ]]; then
   scope="overview"
-  tree_args="--overview"
+  tree_args="--overview --live"
 fi
 q_session="$(printf '%q' "$SESSION")"
 q_log_dir="$(printf '%q' "$LOG_DIR")"
