@@ -75,6 +75,7 @@ LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 # we scan every per-dir log dir AND the global one. Subcommands set
 # AGGREGATE=1 then call _aggregate_log_dirs to iterate.
 AGGREGATE=0
+LIVE_ONLY=0
 _aggregate_log_dirs() {
   if [[ "$AGGREGATE" == "1" ]]; then
     _endy_list_per_dir_log_dirs
@@ -390,7 +391,8 @@ cmd_list() {
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
       --overview|--all-sessions) AGGREGATE=1; shift ;;
-      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
+      --live) LIVE_ONLY=1; shift ;;
+      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview] [--live]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
@@ -417,6 +419,7 @@ cmd_list() {
     local orch;        orch="$(task_orchestrator "$m")"
     local orch_label;  orch_label="$(task_orchestrator_label "$m")"
     local model;       model="$(model_label "$m" "$log" "$agent")"
+    local window;      window="$(meta_field "$m" window)"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     found=1
@@ -476,6 +479,310 @@ cmd_list() {
 # ---------------------------------------------------------------------------
 # tree — group tasks by working directory
 # ---------------------------------------------------------------------------
+# sessions — per-session summary with task counts and live panes
+# ---------------------------------------------------------------------------
+
+cmd_sessions() {
+  local include_all=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) include_all=1; shift ;;
+      *) echo "usage: endy watch sessions [--all]" >&2; exit 2 ;;
+    esac
+  done
+
+  local now; now="$(date +%s)"
+  local have_color=0
+  [[ -t 1 && -z "${NO_COLOR:-}" ]] && have_color=1
+
+  local C_RST="" C_DIM="" C_BOLD="" C_BLU="" C_GRN="" C_YLW="" C_RED="" C_CYN=""
+  if [[ "$have_color" == "1" ]]; then
+    C_RST=$'\033[0m'
+    C_DIM=$'\033[2m'
+    C_BOLD=$'\033[1m'
+    C_BLU=$'\033[34m'
+    C_GRN=$'\033[32m'
+    C_YLW=$'\033[33m'
+    C_RED=$'\033[31m'
+    C_CYN=$'\033[36m'
+  fi
+
+  # Enumerate active per-dir sessions
+  local root="${ENDY_ROOT}/.logs/per-dir"
+  local sessions=()
+
+  if [[ -d "$root" ]]; then
+    shopt -s nullglob
+    local d session_name
+    for d in "${root}"/*/; do
+      [[ -d "$d" ]] || continue
+      session_name="$(basename "${d%/}")"
+      # Only include if tmux session is running
+      tmux has-session -t "$session_name" 2>/dev/null || continue
+      sessions+=("$session_name"$'\t'"$d")
+    done
+    shopt -u nullglob
+  fi
+
+  if [[ "${#sessions[@]}" -eq 0 ]]; then
+    echo "(no active per-dir sessions)"
+    echo "start one with: endy start"
+    return 0
+  fi
+
+  # Header
+  printf '%s%-28s  %-44s  %s%s%s\n'     "" "SESSION" "TASKS" "$C_DIM" "LIVE PANES" "$C_RST"
+  printf '%s\n' "$(printf '─%.0s' {1..120})"
+
+  for entry in "${sessions[@]}"; do
+    local session_name="${entry%%$'\t'*}"
+    local log_dir="${entry#*$'\t'}"
+
+    # Count tasks by status
+    local run_count=0 pending_count=0 done_count=0 fail_count=0 abandoned_count=0
+    local task_total=0
+
+    shopt -s nullglob
+    local m id log kind status
+    for m in "${log_dir}"/task-*.meta; do
+      id="$(basename "$m" .meta | sed 's/^task-//')"
+      log="${log_dir}/task-${id}.log"
+      [[ -f "$log" ]] || { log="${log_dir}/chat-${id}.log"; }
+      kind="$(meta_field "$m" kind 2>/dev/null)"; kind="${kind:-spawn}"
+      status="$(log_status "$log" "$id" "$kind" 2>/dev/null)"
+
+      case "$status" in
+        RUN)        ((run_count++)) ;;
+        PENDING)    ((pending_count++)) ;;
+        DONE)       ((done_count++)) ;;
+        DONE-ERR)   ((done_count++)) ;;
+        FAIL*)      ((fail_count++)) ;;
+        ABANDONED)  ((abandoned_count++)) ;;
+      esac
+      ((task_total++))
+    done
+    shopt -u nullglob
+
+    # Build task summary
+    local task_parts=()
+    [[ "$task_total" -eq 0 ]] && task_parts+=("${C_DIM}0 tasks${C_RST}")
+    [[ "$run_count" -gt 0 ]] && task_parts+=("${C_GRN}${run_count} RUN${C_RST}")
+    [[ "$pending_count" -gt 0 ]] && task_parts+=("${C_YLW}${pending_count} PENDING${C_RST}")
+    [[ "$done_count" -gt 0 ]] && task_parts+=("${C_DIM}${done_count} DONE${C_RST}")
+    [[ "$fail_count" -gt 0 ]] && task_parts+=("${C_RED}${fail_count} FAIL${C_RST}")
+    [[ "$abandoned_count" -gt 0 ]] && task_parts+=("${C_RED}${abandoned_count} ABANDONED${C_RST}")
+    [[ "$include_all" == "0" && "$task_total" -gt 0 && "$run_count" -eq 0 && "$pending_count" -eq 0 ]] && task_parts=("${C_DIM}${task_total} tasks (all finished)${C_RST}")
+
+    local task_str
+    printf -v task_str '%s, ' "${task_parts[@]}"
+    task_str="${task_str%, }"
+
+    # Find live panes for this session
+    local live_panes=()
+    shopt -s nullglob
+    local lm lname lagent lstatus lname_clean
+    for lm in "${log_dir}"/live-*.meta; do
+      lname_clean="$(basename "$lm" .meta | sed 's/^live-//')"
+      # Check if window exists in session
+      if ! tmux list-windows -t "$session_name" -F '#W' 2>/dev/null | grep -qxF "$lname_clean"; then
+        continue
+      fi
+      lagent="$(grep '^agent=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
+      lagent="${lagent:-?}"
+
+      # Quick status from log freshness
+      local llog="${log_dir}/live-${lname_clean}.log"
+      local lstatus="ready"
+      if [[ -f "$llog" ]]; then
+        local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
+        [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
+      fi
+
+      local lcolor=""
+      case "$lstatus" in working) lcolor="$C_GRN" ;; ready) lcolor="$C_BLU" ;; *) lcolor="$C_DIM" ;; esac
+      live_panes+=("${lcolor}${lname_clean}(${lagent})${C_RST}")
+    done
+    shopt -u nullglob
+
+    local live_str="${C_DIM}—${C_RST}"
+    [[ "${#live_panes[@]}" -gt 0 ]] && printf -v live_str '%s, ' "${live_panes[@]}" && live_str="${live_str%, }"
+
+    printf '%-28s  %-44s  %s\n'       "$session_name"       "$task_str"       "$live_str"
+
+    # Attach hint
+    printf '  %stmux attach -t %s%s\n' "$C_DIM" "$session_name" "$C_RST"
+    printf '\n'
+  done
+}
+
+# ---------------------------------------------------------------------------
+# agents — unified view: spawned tasks + live panes in one table
+# ---------------------------------------------------------------------------
+
+cmd_agents() {
+  local include_all=0
+  local cwd_filter=""
+  local orch_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) include_all=1; shift ;;
+      --cwd|--dir) cwd_filter="$2"; shift 2 ;;
+      --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
+      *) echo "usage: endy watch agents [--all] [--cwd <dir>] [--orch <name>]" >&2; exit 2 ;;
+    esac
+  done
+  [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
+  local now; now="$(date +%s)"
+  local have_color=0
+  [[ -t 1 && -z "${NO_COLOR:-}" ]] && have_color=1
+
+  local C_RST="" C_DIM="" C_BOLD="" C_BLU="" C_GRN="" C_YLW="" C_RED="" C_CYN="" C_MAG=""
+  if [[ "$have_color" == "1" ]]; then
+    C_RST=$'\033[0m'
+    C_DIM=$'\033[2m'
+    C_BOLD=$'\033[1m'
+    C_BLU=$'\033[34m'
+    C_GRN=$'\033[32m'
+    C_YLW=$'\033[33m'
+    C_RED=$'\033[31m'
+    C_CYN=$'\033[36m'
+    C_MAG=$'\033[35m'
+  fi
+
+  # Collect all rows: spawned tasks from meta files + live panes from live meta
+  local rows=()
+
+  # --- Spawned tasks ---
+  while IFS= read -r m; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local status; status="$(log_status "$log" "$id" "$kind")"
+    case "$status" in
+      DONE|DONE-ERR|FAIL\(*\)|ABANDONED)
+        [[ "$include_all" == "1" ]] || continue ;;
+    esac
+
+    local cwd; cwd="$(meta_field "$m" cwd)"
+    local agent; agent="$(meta_field "$m" agent)"
+    local agent_label="${agent:-?}"
+    local persona; persona="$(meta_field "$m" persona)"; persona="${persona:---}"
+    [[ "$persona" != "---" ]] && agent_label="${agent_label}[${persona}]"
+    local model; model="$(meta_field "$m" model)"; model="${model:---}"
+    local orch; orch="$(task_orchestrator "$m")"
+    local window; window="$(meta_field "$m" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
+
+    local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
+    local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
+    local runtime="?"
+    [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
+
+    local last="—"
+    [[ -f "$log" ]] && last="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null | tail -1 | strip_ansi | tr -d '\r\n' | head -c 100)"
+
+    local sc; sc="$(status_color "$status")"
+    local type_icon="${C_MAG}S${C_RST}"
+    [[ "$kind" == "chat" ]] && type_icon="${C_CYN}C${C_RST}"
+
+    rows+=("${task_session}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${agent_label}"$'\t'"${id}"$'\t'"${runtime}"$'\t'"${cwd}"$'\t'"${last}"$'\t'"${type_icon}"$'\t'"${orch:-—}"$'\t'"${model}"$'\t'"${persona}")
+  done < <(_iter_meta_files)
+
+  # --- Live panes ---
+  # Enumerate live-*.meta across all log dirs
+  local log_dirs=()
+  while IFS= read -r dir; do
+    log_dirs+=("$dir")
+  done < <(_aggregate_log_dirs)
+
+  for log_dir in "${log_dirs[@]}"; do
+    shopt -s nullglob
+    local lm lname lagent lcwd lpersona lmodel
+    for lm in "${log_dir}"/live-*.meta; do
+      lname="$(basename "$lm" .meta | sed 's/^live-//')"
+      lagent="$(grep '^agent=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
+      lcwd="$(grep '^cwd=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
+      lpersona="$(grep '^persona=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
+      lmodel="$(grep '^model=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
+
+      lagent="${lagent:-?}"
+      lcwd="${lcwd:-?}"
+
+      cwd_matches_filter "$lcwd" "$cwd_filter" || continue
+
+      # Which session owns this pane?
+      local lsess=""
+      if [[ "$log_dir" == "${ENDY_ROOT}/.logs" ]]; then
+        lsess="endy"
+      else
+        lsess="$(basename "$log_dir")"
+      fi
+
+      # Check if window is alive in that session
+      if ! tmux list-windows -t "$lsess" -F '#W' 2>/dev/null | grep -qxF "$lname"; then
+        continue
+      fi
+
+      # Status from log activity
+      local llog="${log_dir}/live-${lname}.log"
+      local lstatus="ready"
+      if [[ -f "$llog" ]]; then
+        local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
+        [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
+      fi
+
+      local llast="—"
+      [[ -f "$llog" ]] && llast="$(tail -1 "$llog" 2>/dev/null | tr -d '\r\n' | head -c 100)"
+
+      # Uptime from meta file
+      local lmeta_mtime; lmeta_mtime="$(stat -c %Y "$lm" 2>/dev/null || echo "$now")"
+      local luptime; luptime="$(human_runtime $((now - lmeta_mtime)))"
+
+      local lagent_label="$lagent"
+      [[ -n "$lpersona" ]] && lagent_label="${lagent_label}[${lpersona}]"
+
+      local lcolor
+      case "$lstatus" in working) lcolor="$C_GRN" ;; ready) lcolor="$C_BLU" ;; *) lcolor="$C_DIM" ;; esac
+
+      rows+=("${lsess}"$'\t'"${lcolor}live${C_RST}"$'\t'"${lagent}"$'\t'"${lagent_label}"$'\t'"${lname}"$'\t'"${luptime}"$'\t'"${lcwd}"$'\t'"${llast}"$'\t'"${C_GRN}L${C_RST}"$'\t'"—"$'\t'"${lmodel:---}"$'\t'"${lpersona:---}")
+    done
+    shopt -u nullglob
+  done
+
+  if [[ "${#rows[@]}" -eq 0 ]]; then
+    if [[ "$include_all" == "1" ]]; then
+      echo "(no agents across any session)"
+    else
+      echo "(no active agents — use '--all' to include finished tasks)"
+    fi
+    return 0
+  fi
+
+  # Header
+  printf '%s%-28s  %-8s  %-16s  %-28s  %-8s  %-42s  %s%s%s\n'     "" "SESSION" "TYPE" "AGENT" "NAME/ID" "RUNTIME" "CWD" "$C_DIM" "LAST OUTPUT" "$C_RST"
+  printf '%s\n' "$(printf '─%.0s' {1..160})"
+
+  # Sort by session, then status priority (RUN/working first)
+  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k2,2 | while IFS=$'\t' read -r session status agent agent_label name runtime cwd last type_icon orch model persona; do
+    local status_str="$status"
+    # Strip ANSI from status if it's a live status
+    status_str="$(printf '%s' "$status_str" | strip_ansi)"
+
+    printf '%-28s  %s%-8s%s  %-16s  %-28s  %-8s  %-42s  %s%s%s\n'       "$(printf '%.28s' "$session")"       "" "${type_icon}" ""       "$(printf '%.16s' "$agent_label")"       "$(printf '%.28s' "$name")"       "$runtime"       "$(printf '%.42s' "$cwd")"       "$C_DIM" "$(printf '%.80s' "$last")" "$C_RST"
+
+    # Attach hint for live panes
+    if [[ "$status_str" == "live" || "$status_str" == "working" ]]; then
+      printf '  %stmux attach -t %s  →  Ctrl-b w  →  select %s%s\n' "$C_DIM" "$session" "$name" "$C_RST"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 
 cmd_tree() {
   local include_all=0
@@ -487,7 +794,8 @@ cmd_tree() {
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
       --overview|--all-sessions) AGGREGATE=1; shift ;;
-      *) echo "usage: endy watch tree [--all] [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
+      --live) LIVE_ONLY=1; shift ;;
+      *) echo "usage: endy watch tree [--all] [--cwd <dir>] [--orch <name>] [--overview] [--live]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
@@ -643,12 +951,21 @@ cmd_follow() {
     exit 1
   fi
 
+  local window; window="$(meta_field "$meta" window)"
+  local task_session="${window%%:*}"
+  [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+
+  if ! tmux has-session -t "$task_session" 2>/dev/null; then
+    echo "task session '$task_session' is not running" >&2
+    exit 1
+  fi
+
   local window_name="follow-${id}"
 
   # If a follow window for this id already exists, just point at it.
-  if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
-    tmux select-window -t "${SESSION}:${window_name}"
-    echo "follow window already open: ${SESSION}:${window_name}"
+  if tmux list-windows -t "$task_session" -F '#W' 2>/dev/null | grep -qx "$window_name"; then
+    tmux select-window -t "${task_session}:${window_name}"
+    echo "follow window already open: ${task_session}:${window_name}"
     print_task_commands "$id" "$window_name"
     return 0
   fi
@@ -657,10 +974,11 @@ cmd_follow() {
   # Use bash explicitly so the heredoc-style semantics are predictable.
   local quoted_prompt; quoted_prompt="$(printf '%q' "$prompt")"
   local quoted_log;    quoted_log="$(printf '%q' "$log")"
+  local q_task_session; q_task_session="$(printf '%q' "$task_session")"
   local inner="bash -c $(printf '%q' "
 clear
 printf '\033[1;36m──── prompt for task %s ────\033[0m\n' '${id}'
-printf '\033[1;33mtmux: attach=%s | select=%s | picker=Ctrl-b w | detach=Ctrl-b d\033[0m\n' '${SESSION}' '${SESSION}:${window_name}'
+printf '\033[1;33mtmux: attach=%s | select=%s | picker=Ctrl-b w | detach=Ctrl-b d\033[0m\n' '${q_task_session}' '${q_task_session}:${window_name}'
 printf '\033[1;33mendy: view=%s | chat=%s | followup=%s | kill=%s\033[0m\n\n' 'endy watch view ${id}' 'endy watch chat ${id}' 'endy watch followup ${id} -- \"<next prompt>\"' 'endy watch kill ${id}'
 [[ -f ${quoted_prompt} ]] && cat ${quoted_prompt} || echo '(no prompt file)'
 echo
@@ -668,10 +986,10 @@ printf '\033[1;36m──── log (live) ────\033[0m\n'
 exec tail -F ${quoted_log}
 ")"
 
-  tmux new-window -t "$SESSION" -n "$window_name" "$inner"
-  tmux set-window-option -t "${SESSION}:${window_name}" remain-on-exit on 2>/dev/null || true
+  tmux new-window -t "$task_session" -n "$window_name" "$inner"
+  tmux set-window-option -t "${task_session}:${window_name}" remain-on-exit on 2>/dev/null || true
 
-  echo "follow window opened: ${SESSION}:${window_name}"
+  echo "follow window opened: ${task_session}:${window_name}"
   print_task_commands "$id" "$window_name"
 }
 
@@ -689,7 +1007,8 @@ cmd_browse() {
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
       --overview|--all-sessions) AGGREGATE=1; shift ;;
-      *) echo "usage: endy watch browse [--all] [--cwd <dir>] [--orch <name>] [--overview]" >&2; exit 2 ;;
+      --live) LIVE_ONLY=1; shift ;;
+      *) echo "usage: endy watch browse [--all] [--cwd <dir>] [--orch <name>] [--overview] [--live]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
@@ -759,6 +1078,12 @@ cmd_browse() {
       cwd_short="$cwd"
     fi
 
+    local session_label=""
+    if [[ "$AGGREGATE" == "1" ]]; then
+      local browse_session="${window%%:*}"
+      [[ -z "$browse_session" || "$browse_session" == "$window" ]] && browse_session="$SESSION"
+      session_label=" [${browse_session}]"
+    fi
     local relation=""
     [[ -n "$parent" ]] && relation=" parent:$(short_task_ref "$parent")"
 
@@ -770,7 +1095,7 @@ cmd_browse() {
       "$model" \
       "$persona" \
       "$C_DIM" "$rt" "$C_RST" \
-      "$C_DIM" "$cwd_short" "$C_RST" \
+      "$C_DIM" "$cwd_short${session_label}" "$C_RST" \
       "$relation")")
   done < <(_iter_meta_files)
 
@@ -971,8 +1296,10 @@ cmd_chat() {
       return 1
     fi
     echo "chat window: $window"
+    local chat_session="${window%%:*}"
+    [[ -z "$chat_session" || "$chat_session" == "$window" ]] && chat_session="$SESSION"
     echo "tmux commands:"
-    echo "  tmux attach -t ${SESSION}"
+    echo "  tmux attach -t ${chat_session}"
     echo "  tmux select-window -t ${window}"
     echo "  tmux kill-window -t ${window}"
     echo
@@ -1306,8 +1633,7 @@ cmd_purge() {
   local changed=1
   while [[ "$changed" == "1" ]]; do
     changed=0
-    shopt -s nullglob
-    for m in "${LOG_DIR}"/task-*.meta; do
+    while IFS= read -r m; do
       local id; id="$(basename "$m" .meta | sed 's/^task-//')"
       local in_set=0
       for existing in "${purge_set[@]}"; do
@@ -1321,8 +1647,7 @@ cmd_purge() {
       for existing in "${purge_set[@]}"; do
         [[ "$existing" == "$parent" ]] && { purge_set+=("$id"); changed=1; break; }
       done
-    done
-    shopt -u nullglob
+    done < <(_iter_meta_files)
   done
 
   echo "Purge plan for root: ${root_id}"
@@ -1338,35 +1663,37 @@ cmd_purge() {
     local prompt; prompt="$(task_prompt_path "$meta" "$id")"
     local kind; kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
     local window; window="$(meta_field "$meta" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
 
     echo "  task: ${id}"
     if [[ -n "$window" ]]; then
       local wname; wname="${window##*:}"
-      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$wname"; then
+      if tmux list-windows -t "$task_session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$wname"; then
         echo "    tmux window: ${window}"
         windows_to_kill+=("$window")
       fi
     fi
 
     local follow_window="follow-${id}"
-    if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$follow_window"; then
-      echo "    tmux follow: ${SESSION}:${follow_window}"
-      windows_to_kill+=("${SESSION}:${follow_window}")
+    if tmux list-windows -t "$task_session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$follow_window"; then
+      echo "    tmux follow: ${task_session}:${follow_window}"
+      windows_to_kill+=("${task_session}:${follow_window}")
     fi
 
     if [[ "$kind" == "chat" && -z "$window" ]]; then
       local chat_window="chat-${id}"
-      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$chat_window"; then
-        echo "    tmux chat: ${SESSION}:${chat_window}"
-        windows_to_kill+=("${SESSION}:${chat_window}")
+      if tmux list-windows -t "$task_session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$chat_window"; then
+        echo "    tmux chat: ${task_session}:${chat_window}"
+        windows_to_kill+=("${task_session}:${chat_window}")
       fi
     fi
 
     if [[ -z "$window" && "$kind" != "chat" ]]; then
       local task_window="task-${id}"
-      if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$task_window"; then
-        echo "    tmux task: ${SESSION}:${task_window}"
-        windows_to_kill+=("${SESSION}:${task_window}")
+      if tmux list-windows -t "$task_session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$task_window"; then
+        echo "    tmux task: ${task_session}:${task_window}"
+        windows_to_kill+=("${task_session}:${task_window}")
       fi
     fi
 
@@ -1473,6 +1800,8 @@ case "${1:-attach}" in
   list|ls)       shift; cmd_list "$@" ;;
   tree)          shift; cmd_tree "$@" ;;
   dir)           shift; cmd_dir "$@" ;;
+  sessions)      shift; cmd_sessions "$@" ;;
+  agents)        shift; cmd_agents "$@" ;;
   log)           shift; cmd_log "$@" ;;
   view)          shift; cmd_view "$@" ;;
   follow)        shift; cmd_follow "$@" ;;

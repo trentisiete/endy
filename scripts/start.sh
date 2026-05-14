@@ -47,11 +47,7 @@ case "$mode" in
     LOG_DIR="${ENDY_LOG_DIR:-${ENDY_ROOT}/.logs}"
     ;;
   per-dir)
-    if [[ -n "${ENDY_SESSION:-}" ]]; then
-      SESSION="$ENDY_SESSION"
-    else
-      SESSION="$(_endy_session_name "$launch_cwd")"
-    fi
+    SESSION="$(_endy_session_name "$launch_cwd")"
     LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
     ;;
   *) echo "unknown --mode: $mode (per-dir|overview)" >&2; exit 2 ;;
@@ -86,7 +82,7 @@ cleanup_runtime_windows() {
 open_manager_windows() {
   local browse_args=""
   local scope="$mode"
-  [[ "$mode" == "overview" ]] && browse_args="--overview"
+  [[ "$mode" == "overview" ]] && browse_args="--overview --live"
   local q_session q_log_dir q_endy_root
   q_session="$(printf '%q' "$SESSION")"
   q_log_dir="$(printf '%q' "$LOG_DIR")"

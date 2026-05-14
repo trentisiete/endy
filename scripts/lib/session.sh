@@ -144,9 +144,14 @@ _endy_list_per_dir_log_dirs() {
   local root="${ENDY_ROOT}/.logs"
   [[ -d "$root" ]] && printf '%s\n' "$root"
   shopt -s nullglob
-  local d
+  local d session_name
   for d in "${root}/per-dir"/*/; do
-    [[ -d "$d" ]] && printf '%s\n' "${d%/}"
+    [[ -d "$d" ]] || continue
+    if [[ "${LIVE_ONLY:-0}" == "1" ]]; then
+      session_name="$(basename "${d%/}")"
+      tmux has-session -t "$session_name" 2>/dev/null || continue
+    fi
+    printf '%s\n' "${d%/}"
   done
   shopt -u nullglob
 }
