@@ -254,9 +254,42 @@ run_agent() {
 
 cmd_install()  { exec "${SCRIPTS}/install.sh" "$@"; }
 cmd_state()    { exec python3 "${SCRIPTS}/state.py" "$@"; }
-cmd_start()    { exec "${SCRIPTS}/start.sh"   --mode=per-dir "$@"; }
+cmd_start()    {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy start [--clean] [--no-attach] [--serve-opencode] [--logs]
+
+Per-directory mode. Opens (or reattaches to) the tmux session for the
+current cwd: endy-<basename> (hash-suffixed on collision).
+
+Layout: orchestrator · tree · list · browse · docs (+ optional opencode/logs).
+
+  --clean            kill the session and rebuild
+  --no-attach        create the session but don't attach
+  --serve-opencode   open an `opencode serve` window
+  --logs             open a log-tail window
+EOF
+    return 0
+  fi
+  exec "${SCRIPTS}/start.sh"   --mode=per-dir "$@"
+}
 cmd_overview() {
-  # Global aggregator — equivalent to today's `endy start`. Forces session "endy".
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy overview [--clean] [--no-attach]
+
+Global aggregator session named "endy" — pure management session, no
+orchestrator window. Aggregates tasks/agents from every endy-* per-dir
+session into one place.
+
+Layout: tree · list · browse · docs (cross-session views).
+
+  --clean       kill the session and rebuild
+  --no-attach   create the session but don't attach
+EOF
+    return 0
+  fi
+  # Equivalent to today's `endy start`. Forces session "endy".
   ENDY_SESSION="endy" ENDY_LOG_DIR="${ENDY_ROOT}/.logs" \
     exec "${SCRIPTS}/start.sh" --mode=overview "$@"
 }
@@ -688,6 +721,17 @@ EOF
 # ---------------------------------------------------------------------------
 
 case "${1:-help}" in
+  -v|--version|version)
+    # Read the version straight from package.json so it never drifts from
+    # what npm published. node is already a hard prereq (postinstall.js).
+    if command -v node >/dev/null 2>&1 && [[ -f "${ENDY_ROOT}/package.json" ]]; then
+      v="$(node -e "console.log(require('${ENDY_ROOT}/package.json').version)" 2>/dev/null)"
+    fi
+    [[ -z "${v:-}" ]] && v="$(grep -m1 '"version"' "${ENDY_ROOT}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+    [[ -z "${v:-}" ]] && v="unknown"
+    printf 'endy %s\n' "$v"
+    exit 0
+    ;;
   install)  shift; cmd_install "$@" ;;
   start)    shift; cmd_start "$@" ;;
   overview) shift; cmd_overview "$@" ;;

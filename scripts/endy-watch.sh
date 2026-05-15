@@ -1750,9 +1750,19 @@ cmd_view() {
 # to follow agent B. Each `follow` call adds a window; tmux does the rest.
 
 cmd_follow() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch follow <id-prefix>
+
+Opens a NEW tmux window named follow-<id> with the task's prompt header
+and the live log tail (less +F). Multiple calls = multiple windows so you
+can watch agent A and agent B side-by-side.
+EOF
+    return 0
+  fi
   require_session
   local prefix="${1:-}"
-  [[ -n "$prefix" ]] || { echo "usage: endy-watch follow <id-prefix>" >&2; exit 2; }
+  [[ -n "$prefix" ]] || { echo "usage: endy watch follow <id-prefix>  (try 'endy watch follow --help')" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
   local meta; meta="$(task_meta_path "$id")"
   local prompt; prompt="$(task_prompt_path "$meta" "$id")"
@@ -2051,6 +2061,23 @@ cmd_browse() {
 # ---------------------------------------------------------------------------
 
 cmd_panel() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch panel [--all|-a]
+
+Tile view of running task logs. Warns if more than 4 tasks would be
+tiled (suggest browse / follow instead). --all includes finished tasks.
+
+Requires an interactive terminal — opens a `panel` window in tmux and
+attaches to it.
+EOF
+    return 0
+  fi
+  if [[ ! -t 1 ]]; then
+    echo "endy watch panel needs an interactive terminal (stdout is not a tty)" >&2
+    echo "usage: endy watch panel [--all|-a]" >&2
+    exit 2
+  fi
   require_session
   local include_all=0
   [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]] && include_all=1
@@ -2108,6 +2135,24 @@ cmd_panel() {
 # ---------------------------------------------------------------------------
 
 cmd_attach() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch attach [<id-prefix>] [--strict]
+
+Attaches the current terminal to the endy tmux session. Default mode is
+read-write (Ctrl-b N still navigates). --strict makes it true read-only
+(blocks the tmux prefix too — use only when you really do not want to
+type into agent panes).
+
+If <id-prefix> is given, focuses that task's window after attach.
+EOF
+    return 0
+  fi
+  if [[ ! -t 1 ]]; then
+    echo "endy watch attach needs an interactive terminal (stdout is not a tty)" >&2
+    echo "usage: endy watch attach [<id-prefix>] [--strict]" >&2
+    exit 2
+  fi
   require_session
   local strict=0
   local prefix=""
@@ -2287,6 +2332,17 @@ ${log_excerpt}
 #   claude   → untested; treated as "no native"
 
 cmd_followup() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch followup <id-prefix> [-- <new-prompt>]
+
+Continues the conversation of an existing task. opencode/hermes resume
+natively; cmd resumes by title (.meta.json) and falls back to context
+injection. Spawns a NEW tmux window with a new TASK_ID whose
+parent_task points back to <id>.
+EOF
+    return 0
+  fi
   require_session
   local prefix=""
   local prompt=""
