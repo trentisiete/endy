@@ -1548,6 +1548,7 @@ cmd_peek() {
   local kind;        kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
   local window;      window="$(meta_field "$meta" window)"
   local task_session="${window%%:*}"
+  local task_window="${window##*:}"
   local log;         log="$(task_log_path "$meta" "$id")"
   local parent;      parent="$(meta_field "$meta" parent_task)"
   local handoff_from;   handoff_from="$(meta_field "$meta" handoff_from)"
@@ -1561,65 +1562,157 @@ cmd_peek() {
   local sess_color; sess_color="$(_endy_session_color "$task_session")"
   local bullet; bullet="$(_endy_status_bullet "$status")"
 
-  # ── session header ──
-  printf '%s▎%s %s%s%s%s' \
+  # ── chip arriba: id · status · agent · runtime · cwd ──
+  # Estilo de pastilla con bordes redondeados, una sola línea visualmente
+  # densa que el ojo capta en un instante.
+  printf '%s╭%s%s\n' "$sess_color" "$(printf '─%.0s' {1..78})" "$C_RST"
+  printf '%s│%s %s  %s%s%s  %s· %s%s  %s· %s%-9s%s' \
     "$sess_color" "$C_RST" \
-    "$C_BOLD" "$sess_color" "$task_session" "$C_RST"
-  [[ -n "$cwd" ]] && printf '   %s%s%s' "$C_DIM" "$cwd" "$C_RST"
-  printf '\n'
-  printf '  %s%s%s\n\n' "$C_DIM" "$(printf '─%.0s' {1..58})" "$C_RST"
-
-  # ── peers in this session (live agent windows + other tasks) ──
-  local printed_peers=0
-  if [[ -n "$task_session" ]] && tmux has-session -t "$task_session" 2>/dev/null; then
-    while IFS=$'\t' read -r wname wcmd wpath; do
-      [[ -n "$wname" ]] || continue
-      case "$wname" in
-        watch|browse|docs|tree|sessions|agents|panel|help|logs|list|__bootstrap) continue ;;
-        task-*|chat-*|follow-*|diag*) continue ;;
-      esac
-      local twagent; twagent="$(_endy_detect_pane_agent "${task_session}:${wname}" "$wname" "$wcmd")"
-      [[ "$twagent" == "shell" ]] && continue
-      printf '   %s  %s%-9s%s   %s%s%s\n' \
-        "$(_endy_status_bullet running)" \
-        "$C_BOLD" "$twagent" "$C_RST" \
-        "$C_DIM" "$wname" "$C_RST"
-      printed_peers=1
-    done < <(tmux list-windows -t "$task_session" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}' 2>/dev/null)
-  fi
-  [[ "$printed_peers" == "0" ]] && printf '   %s(no other agents in this session)%s\n' "$C_DIM" "$C_RST"
-
-  printf '\n  %s━━━ task seleccionado ━━%s\n\n' "$C_DIM" "$C_RST"
-
-  # ── selected task card ──
-  printf '   %s  %s%s%s\n' "$bullet" "$C_BOLD" "$id" "$C_RST"
-  local kv_fmt='       %s%-9s%s %s\n'
-  printf "$kv_fmt" "$C_DIM" "agent"   "$C_RST" "${agent:-—}${persona:+ ${C_DIM}[$persona]${C_RST}}"
-  printf "$kv_fmt" "$C_DIM" "status"  "$C_RST" "$status"
-  printf "$kv_fmt" "$C_DIM" "runtime" "$C_RST" "$runtime"
-  printf "$kv_fmt" "$C_DIM" "cwd"     "$C_RST" "${cwd:-—}"
-  [[ -n "$model"  && "$model"  != "—" ]] && printf "$kv_fmt" "$C_DIM" "model"  "$C_RST" "$model"
-  [[ -n "$parent" && "$parent" != "—" ]] && printf "$kv_fmt" "$C_DIM" "parent" "$C_RST" "$(short_task_ref "$parent")"
+    "$bullet" \
+    "$C_BOLD" "$id" "$C_RST" \
+    "$C_DIM" "$status" "$C_RST" \
+    "$C_DIM" "$C_BOLD" "$agent" "$C_RST"
+  [[ -n "$persona" && "$persona" != "—" ]] && printf '%s[%s]%s' "$C_DIM" "$persona" "$C_RST"
+  printf '  %s· %s%s\n' "$C_DIM" "$runtime" "$C_RST"
+  printf '%s│%s %s%s · %s · %s%s\n' \
+    "$sess_color" "$C_RST" \
+    "$C_DIM" "$task_session" \
+    "${cwd:-—}" \
+    "${model:+· $model}" "$C_RST"
   if [[ -n "$handoff_from" ]]; then
-    printf "$kv_fmt" "$C_DIM" "handoff" "$C_RST" "↪ from $(short_task_ref "$handoff_from")${handoff_reason:+ ${C_DIM}· ${handoff_reason}${C_RST}}"
+    printf '%s│%s %s↪ handoff from %s%s%s\n' \
+      "$sess_color" "$C_RST" \
+      "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
+      "${handoff_reason:+ ${C_DIM}· ${handoff_reason}${C_RST}}"
   fi
-
-  # ── stats line if applicable ──
   if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
-    local stats; stats="$(_endy_print_agent_stats_line "       " "$agent" "$cwd")"
-    [[ -n "$stats" ]] && printf '%s\n' "$stats"
+    local stats; stats="$(_endy_print_agent_stats_line "│ " "$agent" "$cwd")"
+    [[ -n "$stats" ]] && printf '%s%s%s' "$sess_color" "${stats}" "$C_RST"
   fi
+  printf '%s╰%s%s\n' "$sess_color" "$(printf '─%.0s' {1..78})" "$C_RST"
 
-  # ── last lines of the log ──
-  printf '\n  %s──── último output ────%s\n' "$C_DIM" "$C_RST"
-  if [[ "$kind" == "chat" ]]; then
-    printf '  %s(interactive pane — use Ctrl-V for full view)%s\n' "$C_DIM" "$C_RST"
+  # ── body: el TUI vivo del agente si la window existe, si no el log ──
+  printf '\n'
+  local target="${task_session}:${task_window}"
+  if tmux has-session -t "$task_session" 2>/dev/null \
+       && tmux list-windows -t "$task_session" -F '#W' 2>/dev/null \
+            | grep -qxF "$task_window"; then
+    # Capture-pane con -e preserva los códigos ANSI del propio TUI del
+    # agente. Le pasamos los últimos 200 lines y dejamos que fzf lo
+    # renderice tal cual. El head -c es defensivo: algunos panes con
+    # mucha historia escupirían MB enteros.
+    tmux capture-pane -t "$target" -p -e -S -200 2>/dev/null \
+      | tail -n 80 \
+      | head -c 32768
   elif [[ -f "$log" ]]; then
+    printf '  %s(window cerrada — mostrando log)%s\n\n' "$C_DIM" "$C_RST"
     grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
-      | tail -n 12 | strip_ansi | tr -d '\r' \
-      | awk -v dim="${C_DIM:-}" -v rst="${C_RST:-}" '{printf "  %s%s%s\n", dim, $0, rst}'
+      | tail -n 30 | tr -d '\r'
   else
-    printf '  %s(no log yet)%s\n' "$C_DIM" "$C_RST"
+    printf '  %s(no window, no log)%s\n' "$C_DIM" "$C_RST"
+  fi
+}
+
+# handoffs — dedicated view of every handoff chain across every session.
+#
+# A "chain" is a linked list of tasks where each .meta has a non-empty
+# handoff_from pointing at its predecessor. We collect every leaf (a task
+# that nobody else handed off from, i.e. the chain's end) and walk back
+# to its origin, then render the whole chain horizontally as
+# `agent A → agent B → agent C`.
+cmd_handoffs() {
+  AGGREGATE=1
+  local now; now="$(date +%s)"
+
+  # Build maps id → meta, id → handoff_from, id → has-successor.
+  declare -A META_OF FROM_OF HAS_SUCC AGENT_OF STATUS_OF REASON_OF SESSION_OF SPAWNED_OF
+  while IFS= read -r m; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    META_OF[$id]="$m"
+    AGENT_OF[$id]="$(meta_field "$m" agent)"
+    SPAWNED_OF[$id]="$(meta_field "$m" spawned_at)"
+    REASON_OF[$id]="$(meta_field "$m" handoff_reason)"
+    local hf; hf="$(meta_field "$m" handoff_from)"
+    if [[ -n "$hf" ]]; then
+      FROM_OF[$id]="$hf"
+      HAS_SUCC[$hf]=1
+    fi
+    local w; w="$(meta_field "$m" window)"
+    SESSION_OF[$id]="${w%%:*}"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    STATUS_OF[$id]="$(log_status "$log" "$id" "$kind" "${SESSION_OF[$id]}")"
+  done < <(_iter_meta_files)
+
+  # Header
+  printf '%s▌%s%s endy %s%s›%s %sendy watch handoffs%s  %s· cadenas de handoff por sesión%s\n\n' \
+    "${C_MAG:-}" "$C_RST" \
+    "${C_BOLD}${C_MAG:-}" "$C_RST" \
+    "${C_DIM}${C_MAG:-}" "$C_RST" \
+    "${C_BOLD}${C_CYN:-}" "$C_RST" \
+    "$C_DIM" "$C_RST"
+
+  # Find chain leaves (id with no successor, but with at least one handoff_from
+  # somewhere in its lineage).
+  local found=0
+  local leaf
+  for leaf in "${!META_OF[@]}"; do
+    [[ -n "${HAS_SUCC[$leaf]:-}" ]] && continue
+    [[ -n "${FROM_OF[$leaf]:-}" ]] || continue   # not part of any chain
+    found=1
+
+    # Walk back to origin
+    local chain=("$leaf")
+    local cur="$leaf"
+    while [[ -n "${FROM_OF[$cur]:-}" ]]; do
+      cur="${FROM_OF[$cur]}"
+      chain=("$cur" "${chain[@]}")
+    done
+
+    local origin="${chain[0]}"
+    local origin_session="${SESSION_OF[$origin]:-?}"
+    local sess_color; sess_color="$(_endy_session_color "$origin_session")"
+
+    printf '%s▎%s %s%s%s%s   %s%s links%s\n' \
+      "$sess_color" "$C_RST" \
+      "$C_BOLD" "$sess_color" "$origin_session" "$C_RST" \
+      "$C_DIM" "${#chain[@]}" "$C_RST"
+    printf '  %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..70})" "$C_RST"
+
+    # Render horizontally: bullet · agent (id) → bullet · agent (id) → ...
+    local i first=1
+    for i in "${!chain[@]}"; do
+      local lid="${chain[$i]}"
+      local lagent="${AGENT_OF[$lid]:-?}"
+      local lstatus="${STATUS_OF[$lid]:-?}"
+      local lbullet; lbullet="$(_endy_status_bullet "$lstatus")"
+      if [[ "$first" == "1" ]]; then
+        printf '   '
+        first=0
+      else
+        printf '  %s→%s  ' "$C_DIM" "$C_RST"
+      fi
+      printf '%s %s%s%s %s(%s)%s' \
+        "$lbullet" "$C_BOLD" "$lagent" "$C_RST" \
+        "$C_DIM" "$(short_task_ref "$lid")" "$C_RST"
+    done
+    printf '\n'
+
+    # Reasons line: show each link's reason (the "why this handoff happened")
+    local r
+    for i in "${!chain[@]}"; do
+      [[ "$i" == "0" ]] && continue
+      local lid="${chain[$i]}"
+      r="${REASON_OF[$lid]:-}"
+      [[ -n "$r" ]] && printf '       %s↪ %s → %s · %s%s\n' \
+        "$C_DIM" "${AGENT_OF[${chain[$((i-1))]}]:-?}" "${AGENT_OF[$lid]:-?}" "$r" "$C_RST"
+    done
+    printf '\n'
+  done
+
+  if [[ "$found" == "0" ]]; then
+    printf '  %s(no handoff chains yet)%s\n' "$C_DIM" "$C_RST"
+    printf '  %screa una con: endy handoff <task-id> --to <agent>%s\n\n' "$C_DIM" "$C_RST"
   fi
 }
 
@@ -2646,6 +2739,7 @@ case "${1:-attach}" in
   log)           shift; cmd_log "$@" ;;
   view)          shift; cmd_view "$@" ;;
   peek)          shift; cmd_peek "$@" ;;
+  handoffs)      shift; cmd_handoffs "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
   _open)         shift; cmd_open "$@" ;;
