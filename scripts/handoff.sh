@@ -176,10 +176,14 @@ if [[ -z "$target_agent" ]]; then
 handoff: no target agent.
 
 Pass one explicitly:
-  endy handoff $PARENT_ID --to <opencode|cmd|hermes|claude>
+  endy handoff $PARENT_ID --to <opencode|cmd|hermes|claude|gemini|bash>
 
-Or set a resolver (for multiplexor-style routing):
-  export ENDY_HANDOFF_RESOLVER="multiplexor next-provider"   # when multiplexor supports it
+Or wire multiplexor as the resolver (auto-pick the next eligible agent):
+  export ENDY_HANDOFF_RESOLVER=multiplexor-next-provider
+  endy handoff $PARENT_ID         # multiplexor picks the next provider
+
+If the resolver is already set and you're seeing this, every eligible
+provider is exhausted. Reset with: multiplexor reset
 EOF
     exit 2
 fi
