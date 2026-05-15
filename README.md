@@ -8,6 +8,8 @@
   <img src="docs/media/handoff.gif" alt="endy handoff: opencode runs out, cmd picks up mid-task" width="780"/>
 </p>
 
+<sub align="center">Recording script: <a href="docs/demo.md">docs/demo.md</a>.</sub>
+
 ## Why
 
 I kept hitting my paid agent's weekly cap on a Thursday afternoon, with a
@@ -163,6 +165,7 @@ yourself.
 
 - [docs/operations.md](docs/operations.md) — full command reference, manager workflows, the `endy watch` family, the `.logs/` contract, web dashboard internals
 - [docs/cli-gotchas.md](docs/cli-gotchas.md) — per-CLI quirks (`opencode --dir`, `cmd --max-turns`, `hermes -Q`, tmux specifics)
+- [docs/demo.md](docs/demo.md) — script for recording the handoff GIF, beat-by-beat
 
 `endy help` prints top-level usage. `endy help <agent>` (where `<agent>` is
 one of `opencode`, `cmd`, `hermes`, `claude`, `tmux`) prints the relevant
