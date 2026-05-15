@@ -11,7 +11,9 @@
 #   handoff.sh <task-id-prefix> --to <opencode|cmd|hermes|claude|gemini|bash>
 #              [--reason "<text>"]
 #              [--instructions "<text>"]
-#              [--lines N]                     # how much of the parent log to inject (default 80)
+#              [--lines N]                     # truncate the injected log to last N lines
+#                                              # (default: inject the whole log; opt-in cap
+#                                              # for small-context targets like gemini free)
 #              [--stop-parent]                 # kill the parent's tmux window after spawning
 #              [--no-attach]
 #
@@ -59,7 +61,7 @@ parent_prefix=""
 target_agent=""
 reason=""
 instructions=""
-lines=80
+lines=""
 no_attach=0
 stop_parent=0
 
@@ -209,10 +211,14 @@ if [[ -n "$PARENT_PROMPT_FILE" && -f "$PARENT_PROMPT_FILE" ]]; then
 fi
 
 LOG_TAIL=""
+LOG_TAIL_DESC="full output"
 if [[ -n "$PARENT_LOG" && -f "$PARENT_LOG" ]]; then
     LOG_TAIL="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$PARENT_LOG" 2>/dev/null \
-                | _strip_ansi \
-                | tail -n "$lines")"
+                | _strip_ansi)"
+    if [[ -n "$lines" ]]; then
+        LOG_TAIL="$(printf '%s\n' "$LOG_TAIL" | tail -n "$lines")"
+        LOG_TAIL_DESC="last ${lines} lines"
+    fi
 fi
 
 # Compute the chain. Parent's chain (if any) + parent_id. Used for traceability
@@ -246,7 +252,7 @@ ${ORIGINAL_PROMPT}
 
 if [[ -n "$LOG_TAIL" ]]; then
     NEW_PROMPT+="
---- last ${lines} lines of previous agent's output ---
+--- ${LOG_TAIL_DESC} of previous agent's output ---
 ${LOG_TAIL}
 --- end previous output ---
 "
@@ -304,7 +310,7 @@ TASK_ID=${NEW_TASK_ID}
 TMUX_WINDOW=${NEW_WINDOW}
 LOG=${NEW_LOG}
 
-The new agent received: original prompt + last ${lines} lines of ${PARENT_AGENT}'s output.
+The new agent received: original prompt + ${LOG_TAIL_DESC} of ${PARENT_AGENT}'s output.
 
 tmux:
   tmux attach -t ${PARENT_SESSION}

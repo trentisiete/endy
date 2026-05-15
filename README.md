@@ -29,7 +29,7 @@ endy handoff <task-id> --to <next-agent>
 reads the original prompt, tails the previous agent's output, opens a new
 tmux window with a different CLI, and tells it:
 
-> *Here is what was being done. Here is the last 80 lines of what your
+> *Here is what was being done. Here is the full output of what your
 > predecessor wrote. The previous agent stopped because of `<reason>`.
 > Continue.*
 
@@ -89,9 +89,11 @@ endy watch tree                                       # see it running
 # (opencode hits a rate limit, log shows "RESOURCE_EXHAUSTED")
 
 endy handoff <task-id> --to cmd --reason "rate limited" --stop-parent
-# → new cmd window opens, reads the original prompt + opencode's last 80 lines,
-#   continues from where opencode stopped. Add --stop-parent to close the
-#   rate-limited window in the same shot so the dashboard stays clean.
+# → new cmd window opens, reads the original prompt + the FULL log of what
+#   opencode produced, and continues from where opencode stopped. Add
+#   --stop-parent to close the rate-limited window in the same shot.
+#   (Use --lines N to truncate if you're handing off to a small-context
+#   target like gemini free.)
 ```
 
 Want to rehearse the loop without burning any real-agent credit? Use the

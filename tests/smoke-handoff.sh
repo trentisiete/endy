@@ -70,7 +70,7 @@ grep -q "^handoff_reason=codex rate limit" "$CHILD_META" && ok "handoff_reason s
 grep -q "endy handoff — you are taking over" "$CHILD_PROMPT" && ok "composite prompt has handoff markers" || fail "no markers"
 grep -q "original task prompt" "$CHILD_PROMPT" && ok "composite prompt includes parent prompt section" || fail "no original prompt section"
 grep -q "hello-world Python script" "$CHILD_PROMPT" && ok "composite prompt carries parent's text" || fail "parent text not propagated"
-grep -q "last 80 lines of previous agent" "$CHILD_PROMPT" && ok "composite prompt includes log tail section" || fail "no log tail"
+grep -qE "(full output|last [0-9]+ lines) of previous agent" "$CHILD_PROMPT" && ok "composite prompt includes log section" || fail "no log section"
 
 header "4. endy watch list shows ↪ in PARENT column for the child"
 LIST_OUT="$(NO_COLOR=1 ENDY_SESSION=$SESSION ENDY_LOG_DIR=$ENDY/.logs/per-dir/$SESSION "$ENDY/bin/endy" watch list)"

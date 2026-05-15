@@ -103,7 +103,11 @@ Default: `--full-auto` (auto-approve permission prompts). Pass
 endy handoff <task-id> --to <agent>
                        [--reason "<text>"]
                        [--instructions "<text>"]
-                       [--lines N]            # default 80
+                       [--lines N]            # truncate the injected log to last N lines.
+                                              # default: inject the WHOLE log so the new
+                                              # agent doesn't miss anything. Use this only
+                                              # when the target has a small context window
+                                              # (e.g. gemini free) or the parent log is huge.
                        [--stop-parent]        # kill the parent's tmux window after spawning
                        [--no-attach]
 ```
@@ -133,8 +137,8 @@ Reason for handoff: <reason>
 <original>
 --- end original task prompt ---
 
---- last <N> lines of previous agent's output ---
-<tail>
+--- full output of previous agent's output ---       (or "last N lines" if --lines set)
+<output>
 --- end previous output ---
 
 --- handoff instructions ---
@@ -421,6 +425,7 @@ endy spawn <agent> [--supervised] [--prompt-file <file>] -- "<prompt>"
 endy ask <agent> "<prompt>"
 endy chat <agent>
 endy handoff <id> --to <agent> [--reason "<text>"] [--instructions "<text>"] [--lines N] [--stop-parent] [--no-attach]
+                              # --lines N truncates the injected log; default is the full log
 endy watch list [--overview]
 endy watch tree [--all] [--overview]
 endy watch browse [--all] [--overview] [--cwd <dir>] [--orch <name>]
