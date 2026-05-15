@@ -1,6 +1,6 @@
 {
   "name": "@noetiklab/endy",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Multi-agent control plane for coding CLIs (codex, opencode, cmd, hermes) — tmux-based orchestration, web dashboard.",
   "bin": { "endy": "bin/endy" },
   "scripts": {
