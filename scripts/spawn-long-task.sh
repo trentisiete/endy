@@ -45,6 +45,7 @@ prompt=""
 prompt_file=""
 full_auto=0
 no_state=0
+no_auto_handoff=0
 resume_id=""
 parent_task=""
 handoff_from=""
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --prompt-file)  prompt_file="$2";  shift 2 ;;
     --full-auto)    full_auto=1;       shift   ;;
     --no-state)     no_state=1;        shift   ;;
+    --no-auto-handoff) no_auto_handoff=1; shift ;;
     --max-turns)    max_turns="$2";    shift 2 ;;
     --resume)         resume_id="$2";     shift 2 ;;
     --parent-task)    parent_task="$2";   shift 2 ;;
@@ -142,6 +144,7 @@ resume_id=${resume_id}
 handoff_from=${handoff_from}
 handoff_chain=${handoff_chain}
 handoff_reason=${handoff_reason}
+auto_handoff=$(( 1 - no_auto_handoff ))
 EOF
 
 # Compose the prompt. Default: prepend a '## endy environment' block so the
@@ -245,11 +248,20 @@ quoted_log_path="$(printf '%q' "$LOG_PATH")"
 # The full shell command run inside the new tmux window. The prompt is
 # substituted by the shell at runtime via $(cat <file>), so the literal
 # command stays small even for 100KB prompts.
+#
+# After the agent exits and ENDY_EXIT=<n> lands in the log, run
+# scripts/auto-handoff.sh in the same shell. It checks meta + log for a
+# known exhaustion signal and conditionally invokes `endy handoff`. The
+# stub agent doesn't get this hook (it never exits non-zero on its own;
+# tests that exercise auto-handoff drive the auto-handoff.sh script
+# directly with synthesized logs).
+quoted_endy_root="$(printf '%q' "$ENDY_ROOT")"
+quoted_task_id="$(printf '%q' "$TASK_ID")"
 if [[ "$agent" == "bash" || "$agent" == "stub" || "$agent" == "noop" ]]; then
   # Offline stub: print the prompt + idle. No external command, no API.
   INNER_CMD="{ printf '[stub agent — prompt follows]\\n'; cat ${quoted_prompt_path}; printf '\\n[stub idle — Ctrl-c to exit, or kill via endy watch kill]\\n'; sleep infinity; } 2>&1 | tee ${quoted_log_path}"
 else
-  INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}"
+  INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}; ${quoted_endy_root}/scripts/auto-handoff.sh ${quoted_task_id} || true"
 fi
 
 tmux new-window -t "${SESSION}" -n "${WINDOW_NAME}" -c "${cwd}" "${INNER_CMD}"
