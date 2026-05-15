@@ -1,6 +1,6 @@
 {
   "name": "@noetiklab/endy",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Hand a coding task from one CLI agent to another when its free tier runs out. tmux-based control plane for codex, opencode, cmd, hermes, gemini.",
   "bin": {
     "endy": "bin/endy"
