@@ -168,6 +168,109 @@ human_runtime() {
   fi
 }
 
+# Compact token formatter: 17758 -> 17.7k, 1393649 -> 1.4M. Locale-free.
+_endy_fmt_short() {
+  local n="${1:-0}"
+  [[ "$n" =~ ^[0-9]+$ ]] || { printf '?'; return; }
+  if   [[ "$n" -ge 1000000 ]]; then printf '%d.%dM' $((n/1000000)) $(((n%1000000)/100000))
+  elif [[ "$n" -ge 1000    ]]; then printf '%d.%dk' $((n/1000))    $(((n%1000)/100))
+  else                              printf '%d' "$n"
+  fi
+}
+
+# 10-cell context-fill bar (▰ used, ░ free). Always 10 chars wide.
+_endy_bar() {
+  local pct="${1:-0}"
+  [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+  [[ "$pct" -gt 100 ]] && pct=100
+  local filled=$((pct / 10))
+  local empty=$((10 - filled))
+  local s="" i
+  for ((i=0; i<filled; i++)); do s+="▰"; done
+  for ((i=0; i<empty;  i++)); do s+="░"; done
+  printf '%s' "$s"
+}
+
+# "in 3h12m" — given an epoch, return a tight relative interval until then.
+_endy_resets_in() {
+  local r="${1:-0}"
+  [[ "$r" =~ ^[0-9]+$ && "$r" -gt 0 ]] || { printf '?'; return; }
+  local now; now=$(date +%s)
+  local diff=$((r - now))
+  if   [[ "$diff" -lt 0     ]]; then printf 'now'
+  elif [[ "$diff" -lt 3600  ]]; then printf '%dm' $((diff/60))
+  elif [[ "$diff" -lt 86400 ]]; then printf '%dh%02dm' $((diff/3600)) $(((diff%3600)/60))
+  else                              printf '%dd' $((diff/86400))
+  fi
+}
+
+# Best-effort stats helpers per agent. Always succeed; emit empty string when
+# no data exists. Read-only — never block or modify the caller's state.
+_endy_codex_stats() {
+  local cwd="${1:-}"
+  [[ -n "$cwd" && "$cwd" != "—" && "$cwd" != "?" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  local helper="${ENDY_ROOT}/scripts/_endy-codex-stats.py"
+  [[ -f "$helper" ]] || return 0
+  python3 "$helper" "$cwd" 2>/dev/null || true
+}
+
+_endy_opencode_stats() {
+  local cwd="${1:-}"
+  [[ -n "$cwd" && "$cwd" != "—" && "$cwd" != "?" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  local helper="${ENDY_ROOT}/scripts/_endy-opencode-stats.py"
+  [[ -f "$helper" ]] || return 0
+  python3 "$helper" "$cwd" 2>/dev/null || true
+}
+
+# Print one compact statusline under an agent row. No-op if no stats. Style
+# borrowed from opencode's own bottom bar: bar + percentage + tight numbers
+# joined by middle dots, so the eye can scan a row in one look.
+_endy_print_agent_stats_line() {
+  local indent="$1" agent="$2" cwd="$3"
+  case "$agent" in
+    codex)
+      local stats; stats="$(_endy_codex_stats "$cwd")"
+      [[ -n "$stats" ]] || return 0
+      local ctx pct total window h5p wkp plan resets
+      IFS='|' read -r ctx pct total window h5p wkp plan resets <<< "$stats"
+      [[ -n "$ctx" && "$ctx" != "0" ]] || return 0
+      local bar; bar="$(_endy_bar "$pct")"
+      local line
+      printf -v line '%s%s%s %s%d%%%s  %sctx %s/%s%s' \
+        "$indent" "$C_BLU" "$bar" "$C_BOLD" "$pct" "$C_RST" \
+        "$C_DIM" "$(_endy_fmt_short "$ctx")" "$(_endy_fmt_short "$window")" "$C_RST"
+      if [[ -n "$h5p" ]]; then
+        line+="  ${C_DIM}·${C_RST} 5h ${C_YLW}${h5p}%${C_RST}"
+        [[ -n "$resets" ]] && line+=" ${C_DIM}(↺$(_endy_resets_in "$resets"))${C_RST}"
+      fi
+      [[ -n "$wkp"  ]] && line+="  ${C_DIM}·${C_RST} wk ${C_YLW}${wkp}%${C_RST}"
+      [[ -n "$plan" ]] && line+="  ${C_DIM}· ${plan}${C_RST}"
+      printf '%s\n' "$line"
+      ;;
+    opencode)
+      local stats; stats="$(_endy_opencode_stats "$cwd")"
+      [[ -n "$stats" ]] || return 0
+      local ctx pct tin tout tcr tcw tres cost model window
+      IFS='|' read -r ctx pct tin tout tcr tcw tres cost model window <<< "$stats"
+      [[ -n "$ctx" && "$ctx" != "0" ]] || return 0
+      local bar; bar="$(_endy_bar "$pct")"
+      local model_short="${model##*/}"
+      local cost_str="$cost"
+      [[ "$cost" =~ ^[0-9.]+$ ]] && cost_str="$(printf '%.2f' "$cost" 2>/dev/null || printf '%s' "$cost")"
+      local line
+      printf -v line '%s%s%s %s%d%%%s  %sctx %s/%s%s  %s·%s ↑%s ↓%s' \
+        "$indent" "$C_BLU" "$bar" "$C_BOLD" "$pct" "$C_RST" \
+        "$C_DIM" "$(_endy_fmt_short "$ctx")" "$(_endy_fmt_short "$window")" "$C_RST" \
+        "$C_DIM" "$C_RST" "$(_endy_fmt_short "$tin")" "$(_endy_fmt_short "$tout")"
+      [[ -n "$cost_str"    ]] && line+="  ${C_DIM}·${C_RST} \$${cost_str}"
+      [[ -n "$model_short" ]] && line+="  ${C_DIM}· ${model_short}${C_RST}"
+      printf '%s\n' "$line"
+      ;;
+  esac
+}
+
 # Read a key=value field from a meta file.
 meta_field() {
   local meta="$1" field="$2"
@@ -787,7 +890,7 @@ cmd_agents() {
     while IFS=$'\t' read -r wname wcmd wpath wact; do
       [[ -n "$wname" ]] || continue
       case "$wname" in
-        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|opencode|logs|__bootstrap) continue ;;
+        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
         task-*|chat-*|follow-*|diag*) continue ;;
       esac
       local key="${tsess}:${wname}"
@@ -846,6 +949,7 @@ cmd_agents() {
     if [[ "$status_str" == "live" || "$status_str" == "working" || "$status_str" == "running" ]]; then
       printf '  %stmux attach -t %s  →  Ctrl-b w  →  select %s%s\n' "$C_DIM" "$session" "$name" "$C_RST"
     fi
+    [[ "$agent" == "codex" || "$agent" == "opencode" ]] && _endy_print_agent_stats_line "  " "$agent" "$cwd"
   done
 }
 
@@ -973,7 +1077,7 @@ cmd_tree() {
     while IFS=$'\t' read -r wname wcmd wpath wact; do
       [[ -n "$wname" ]] || continue
       case "$wname" in
-        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|opencode|logs|__bootstrap) continue ;;
+        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
         task-*|chat-*|follow-*|diag*) continue ;;
       esac
       local key="${tsess}:${wname}"
@@ -1042,6 +1146,7 @@ cmd_tree() {
       printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s parent:%s  %s\n' \
         "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$(short_task_ref "$parent")" "$last"
     fi
+    [[ "$agent" == "codex" || "$agent" == "opencode" ]] && _endy_print_agent_stats_line "      " "$agent" "$cwd"
   done
 }
 
