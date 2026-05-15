@@ -90,4 +90,31 @@ for target in "$HOME/.codex/AGENTS.md" "$HOME/.commandcode/AGENTS.md" "$HOME/.co
   ok "$target resolves correctly"
 done
 
+header "8. Skills symlinked into every CLI's auto-discovery path"
+# Each CLI's actual skill home (per official docs May 2026). Each path
+# must contain endy-delegate/SKILL.md AND endy-live/SKILL.md as resolvable
+# symlinks back to ENDY_ROOT/codex/skills/.
+SKILL_HOMES=(
+  "$HOME/.agents/skills:Codex canonical (agentskills.io)"
+  "$HOME/.codex/skills:Codex legacy (back-compat)"
+  "$HOME/.claude/skills:Claude Code"
+  "$HOME/.hermes/skills:Hermes"
+)
+for entry in "${SKILL_HOMES[@]}"; do
+  base="${entry%%:*}"
+  label="${entry#*:}"
+  for skill in endy-delegate endy-live; do
+    target="$base/$skill/SKILL.md"
+    [[ -L "$base/$skill" ]] || fail "$base/$skill is not a symlink (CLI=$label)"
+    [[ -f "$target" ]]      || fail "$target not reachable (CLI=$label)"
+    # SKILL.md must contain valid agentskills.io frontmatter (name + description).
+    # `tr -d '\r'` strips CRLF that may sneak in from Windows-checked-out files.
+    tr -d '\r' < "$target" | grep -q "^name: $skill$" \
+      || fail "$target missing 'name: $skill' frontmatter"
+    tr -d '\r' < "$target" | grep -q "^description: " \
+      || fail "$target missing 'description:' frontmatter"
+    ok "$base/$skill/SKILL.md reachable + frontmatter ok ($label)"
+  done
+done
+
 printf '\n\033[1;32mSMOKE TEST PASSED\033[0m\n'
