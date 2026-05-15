@@ -218,7 +218,11 @@ def _compose_tiers(cwd):
 # ---------------------------------------------------------------------------
 
 def _self_from_meta(meta_path, meta):
-    """Build the `self` block from a parsed meta dict."""
+    """Build the `self` block from a parsed meta dict.
+
+    The worktree_* fields are Phase 5: when present, the task is running
+    in an isolated git worktree (see SKILL.md / docs/roadmap.md Phase 5).
+    """
     return {
         "task_id": meta.get("task_id") or "",
         "agent": meta.get("agent") or "",
@@ -229,6 +233,10 @@ def _self_from_meta(meta_path, meta):
         "orchestrator_agent": meta.get("orchestrator_agent") or "",
         "spawned_at": meta.get("spawned_at") or "",
         "meta_path": str(meta_path),
+        "worktree_dir": meta.get("worktree_dir") or "",
+        "worktree_branch": meta.get("worktree_branch") or "",
+        "worktree_origin_cwd": meta.get("worktree_origin_cwd") or "",
+        "worktree_inherited": meta.get("worktree_inherited") or "",
     }
 
 
@@ -483,6 +491,16 @@ def render_prompt(state):
         cwd = s.get("cwd", "?")
         out.append(f"You are **{agent}**, task `{task_id}` in `{cwd}` "
                    f"(session `{session}`).")
+        # Phase 5: if we're in an isolated worktree, mention it. Agents
+        # need to know they can edit freely without stomping a peer task.
+        wt_dir = s.get("worktree_dir") or ""
+        if wt_dir:
+            wt_branch = s.get("worktree_branch") or "?"
+            wt_origin = s.get("worktree_origin_cwd") or "?"
+            wt_inherited = s.get("worktree_inherited") or ""
+            tag = " (inherited from previous link)" if wt_inherited else ""
+            out.append(f"Git worktree: branch `{wt_branch}` "
+                       f"(origin repo: `{wt_origin}`){tag}.")
         out.append("")
 
     chain_block, full_len = _render_chain_block(lin, (s.get("agent") if s else "?"))

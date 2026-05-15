@@ -34,6 +34,8 @@ set -euo pipefail
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/session.sh
 . "${ENDY_ROOT}/scripts/lib/session.sh"
+# shellcheck source=lib/worktree.sh
+. "${ENDY_ROOT}/scripts/lib/worktree.sh"
 SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
 LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 
@@ -46,6 +48,11 @@ prompt_file=""
 full_auto=0
 no_state=0
 no_auto_handoff=0
+# Phase 5: worktree isolation. "auto" honors ENDY_DEFAULT_WORKTREE (set by
+# cmd_orchestrator); "on" forces creation; "off" forces skip.
+worktree_flag="auto"
+worktree_inherit_dir=""
+worktree_inherit_branch=""
 resume_id=""
 parent_task=""
 handoff_from=""
@@ -74,6 +81,10 @@ while [[ $# -gt 0 ]]; do
     --full-auto)    full_auto=1;       shift   ;;
     --no-state)     no_state=1;        shift   ;;
     --no-auto-handoff) no_auto_handoff=1; shift ;;
+    --worktree)     worktree_flag="on";  shift   ;;
+    --no-worktree)  worktree_flag="off"; shift   ;;
+    --worktree-inherit-dir)     worktree_inherit_dir="$2";    shift 2 ;;
+    --worktree-inherit-branch)  worktree_inherit_branch="$2"; shift 2 ;;
     --max-turns)    max_turns="$2";    shift 2 ;;
     --resume)         resume_id="$2";     shift 2 ;;
     --parent-task)    parent_task="$2";   shift 2 ;;
@@ -118,6 +129,50 @@ LOG_PATH="${LOG_DIR}/task-${TASK_ID}.log"
 META_PATH="${LOG_DIR}/task-${TASK_ID}.meta"
 WINDOW_NAME="task-${TASK_ID}"
 
+# Phase 5: optional git worktree isolation.
+#
+# Three sources of truth, in priority order:
+#   1. --worktree-inherit-dir <path>  → child of a handoff. Reuse the
+#      parent's worktree dir verbatim, do NOT create a new one. Marked
+#      worktree_inherited=1 so cleanup skips it.
+#   2. --worktree                     → force-create a fresh worktree.
+#   3. ENDY_DEFAULT_WORKTREE=1        → cmd_orchestrator exports this so
+#      orchestrator-initiated spawns get isolation by default.
+# --no-worktree overrides all of the above to keep the existing
+# non-worktree behavior unchanged.
+worktree_dir=""
+worktree_branch=""
+worktree_origin_cwd="$cwd"
+worktree_inherited=""
+worktree_skip_reason=""
+
+if [[ "$worktree_flag" == "off" ]]; then
+  :  # explicit opt-out — never touch git
+elif [[ -n "$worktree_inherit_dir" ]]; then
+  # Handoff path: parent already owns a worktree. Just point cwd at it
+  # and record provenance in meta. Cleanup ignores inherited rows.
+  if [[ -d "$worktree_inherit_dir" ]]; then
+    worktree_dir="$worktree_inherit_dir"
+    worktree_branch="$worktree_inherit_branch"
+    worktree_inherited=1
+    cwd="$worktree_dir"
+  else
+    worktree_skip_reason="inherited-path-missing:${worktree_inherit_dir}"
+  fi
+elif [[ "$worktree_flag" == "on" || "${ENDY_DEFAULT_WORKTREE:-0}" == "1" ]]; then
+  if repo_root="$(_endy_worktree_repo_root "$cwd" 2>/dev/null)" && [[ -n "$repo_root" ]]; then
+    if wt_path="$(_endy_worktree_create "$repo_root" "$TASK_ID" 2>&1)"; then
+      worktree_dir="$wt_path"
+      worktree_branch="$(_endy_worktree_branch_for "$TASK_ID")"
+      cwd="$worktree_dir"
+    else
+      worktree_skip_reason="worktree-create-failed"
+    fi
+  else
+    worktree_skip_reason="not-a-git-repo"
+  fi
+fi
+
 # Write meta BEFORE the prompt + tmux window. state.py needs to be able to
 # read this task's own meta when it composes the '## endy environment' block
 # we're about to prepend to the prompt — and the handoff chain in lineage is
@@ -145,6 +200,11 @@ handoff_from=${handoff_from}
 handoff_chain=${handoff_chain}
 handoff_reason=${handoff_reason}
 auto_handoff=$(( 1 - no_auto_handoff ))
+worktree_dir=${worktree_dir}
+worktree_branch=${worktree_branch}
+worktree_origin_cwd=${worktree_origin_cwd}
+worktree_inherited=${worktree_inherited}
+worktree_skip_reason=${worktree_skip_reason}
 EOF
 
 # Compose the prompt. Default: prepend a '## endy environment' block so the

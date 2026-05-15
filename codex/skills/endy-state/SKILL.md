@@ -96,7 +96,9 @@ child's own freshly generated block at the very top.
   "self": {
     "task_id": "...", "agent": "...", "session": "...", "window": "...",
     "cwd": "...", "orchestrator": "...", "orchestrator_agent": "...",
-    "spawned_at": "...", "meta_path": "..."
+    "spawned_at": "...", "meta_path": "...",
+    "worktree_dir": "...", "worktree_branch": "endy/task-...",
+    "worktree_origin_cwd": "...", "worktree_inherited": "1"
   },
   "lineage": {
     "handoff_chain": [
