@@ -98,10 +98,17 @@ open_view_window() {
   for a in "$@"; do q_args+=" $(printf '%q' "$a")"; done
 
   kill_window_if_exists "$window"
+  # The cd at the start of each loop iteration is defensive: if a global
+  # npm upgrade replaces ENDY_ROOT, the original dir gets unlinked and the
+  # bash process is left with a dangling cwd ("(deleted)"), which in turn
+  # makes every internal `pwd` / shell completion emit "shell-init: error
+  # retrieving current directory". Re-cd'ing each tick is cheap and
+  # idempotent, and silently no-ops if the new ENDY_ROOT also disappears.
   tmux new-window -t "$SESSION" -n "$window" -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
 while :; do
+  cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
   clear
   printf '\033[1;36m${title}\033[0m \033[2m| session=${SESSION} | auto-refresh 2s | Ctrl-c -> shell\033[0m\n'
   printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n\n'
@@ -124,13 +131,15 @@ open_browse_window() {
 
   kill_window_if_exists browse
   tmux new-window -t "$SESSION" -n browse -c "$ENDY_ROOT" \
-    "bash -lc $(printf '%q' "clear
+    "bash -lc $(printf '%q' "cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
+clear
 export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
 printf '\033[1;36mendy watch browse \033[0m\033[2m| session=${SESSION} | auto-relaunch\033[0m\n'
 printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n'
 printf '\033[1;33menter chat/switch | Ctrl-o chat bg | Ctrl-f follow | Ctrl-v view | Ctrl-l log | Ctrl-k kill | Ctrl-d purge | esc salir\033[0m\n\n'
 while :; do
+  cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
   ${q_endy_root}/bin/endy watch browse${q_args}
   printf '\n\033[2mpicker cerrado — relanzando en 1s. Ctrl-c para shell.\033[0m\n'
   sleep 1 || break
@@ -160,6 +169,16 @@ BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 }
 
 open_manager_windows() {
+  # Always evict obsolete-layout windows so that re-running `endy start` /
+  # `endy overview` (without --clean) on an upgraded install converges to
+  # the current layout. Without this, panes carried over from a previous
+  # version stick around with dangling cwd and stale code.
+  kill_window_if_exists agents
+  kill_window_if_exists sessions
+  kill_window_if_exists panel
+  kill_window_if_exists watch
+  kill_window_if_exists help
+
   if [[ "$mode" == "overview" ]]; then
     open_view_window   tree  'endy watch tree - arbol de tareas (todas las sesiones)'  tree --overview --live --all
     open_view_window   list  'endy watch list - detalle por task (todas las sesiones)' list --overview

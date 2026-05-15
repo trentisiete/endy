@@ -648,7 +648,13 @@ cmd_list() {
     local runtime="?"
     [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
 
-    local status; status="$(log_status "$log" "$id" "$kind")"
+    # Use the task's own tmux session for liveness — log_status defaults to
+    # $SESSION which in overview mode is "endy", and no per-dir task lives
+    # there, so without this every overview row would show ABANDONED.
+    local task_window_meta; task_window_meta="$(meta_field "$m" window)"
+    local task_session_meta="${task_window_meta%%:*}"
+    [[ -z "$task_session_meta" || "$task_session_meta" == "$task_window_meta" ]] && task_session_meta="$SESSION"
+    local status; status="$(log_status "$log" "$id" "$kind" "$task_session_meta")"
 
     local last
     if [[ "$kind" == "chat" ]]; then
@@ -857,7 +863,14 @@ cmd_sessions() {
         log="${log_dir}/task-${id}.log"
         [[ -f "$log" ]] || log="${log_dir}/chat-${id}.log"
         kind="$(meta_field "$m" kind 2>/dev/null)"; kind="${kind:-spawn}"
-        status="$(log_status "$log" "$id" "$kind" 2>/dev/null)"
+        # Use the task's own session (not the caller's $SESSION) for the
+        # tmux-liveness probe: overview shows tasks owned by every per-dir
+        # session, and they're alive in their own session, not in "endy".
+        local _tw _ts
+        _tw="$(meta_field "$m" window 2>/dev/null)"
+        _ts="${_tw%%:*}"
+        [[ -z "$_ts" || "$_ts" == "$_tw" ]] && _ts="$session_name"
+        status="$(log_status "$log" "$id" "$kind" "$_ts" 2>/dev/null)"
         case "$status" in
           RUN)        ((run_count++)) ;;
           PENDING)    ((pending_count++)) ;;
@@ -934,7 +947,10 @@ cmd_agents() {
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
-    local status; status="$(log_status "$log" "$id" "$kind")"
+    local window; window="$(meta_field "$m" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+    local status; status="$(log_status "$log" "$id" "$kind" "$task_session")"
     case "$status" in
       DONE|DONE-ERR|FAIL\(*\)|ABANDONED)
         [[ "$include_all" == "1" ]] || continue ;;
@@ -947,9 +963,6 @@ cmd_agents() {
     [[ "$persona" != "---" ]] && agent_label="${agent_label}[${persona}]"
     local model; model="$(meta_field "$m" model)"; model="${model:---}"
     local orch; orch="$(task_orchestrator "$m")"
-    local window; window="$(meta_field "$m" window)"
-    local task_session="${window%%:*}"
-    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
 
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
@@ -1177,7 +1190,10 @@ cmd_tree() {
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
-    local status; status="$(log_status "$log" "$id" "$kind")"
+    local window; window="$(meta_field "$m" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+    local status; status="$(log_status "$log" "$id" "$kind" "$task_session")"
     case "$status" in
       DONE|DONE-ERR|FAIL\(*\)|ABANDONED)
         [[ "$include_all" == "1" ]] || continue ;;
@@ -1188,9 +1204,6 @@ cmd_tree() {
     local orch; orch="$(task_orchestrator "$m")"
     local orch_label; orch_label="$(task_orchestrator_label "$m")"
     local model; model="$(model_label "$m" "$log" "$agent")"
-    local window; window="$(meta_field "$m" window)"
-    local task_session="${window%%:*}"
-    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local parent; parent="$(meta_field "$m" parent_task)"; parent="${parent:-—}"
@@ -1306,7 +1319,16 @@ cmd_tree() {
 
       rows+=("${tsess}"$'\t'"${tsess}"$'\t'"${wpath}"$'\t'"${tsess}"$'\t'"${wname}"$'\t'"running"$'\t'"${twagent}"$'\t'"—"$'\t'"tmux"$'\t'"—"$'\t'"${twruntime}"$'\t'"${twlast}"$'\t'""$'\t'"")
     done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}'$'\t''#{window_activity}' 2>/dev/null)
-  done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
+  done < <(
+    # In overview mode walk every endy* session. In per-dir mode the tree is
+    # local — restrict discovery to $SESSION so endy-projA:tree doesn't list
+    # agents from endy-Noetiklab, endy-endy, etc.
+    if [[ "$AGGREGATE" == "1" ]]; then
+      tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true
+    else
+      tmux has-session -t "$SESSION" 2>/dev/null && printf '%s\n' "$SESSION"
+    fi
+  )
 
   if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
@@ -1554,7 +1576,12 @@ cmd_browse() {
     spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local rt="?"
     [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
-    local st; st="$(log_status "$log" "$id" "$kind")"
+    # log_status liveness probe goes to the task's own tmux session.
+    local _bw _bs
+    _bw="$(meta_field "$m" window 2>/dev/null)"
+    _bs="${_bw%%:*}"
+    [[ -z "$_bs" || "$_bs" == "$_bw" ]] && _bs="$SESSION"
+    local st; st="$(log_status "$log" "$id" "$kind" "$_bs")"
     case "$st" in
       DONE|DONE-ERR|FAIL\(*\)|FAILED\(*\)|ABANDONED)
         [[ "$include_all" == "1" ]] || continue ;;
@@ -2106,7 +2133,11 @@ cmd_kill_all() {
 
     local log; log="$(task_log_path "$m" "$id")"
     if [[ "${done_only:-0}" == "1" ]]; then
-      local st; st="$(log_status "$log" "$id" "$kind")"
+      local _kw _ks
+      _kw="$(meta_field "$m" window 2>/dev/null)"
+      _ks="${_kw%%:*}"
+      [[ -z "$_ks" || "$_ks" == "$_kw" ]] && _ks="$SESSION"
+      local st; st="$(log_status "$log" "$id" "$kind" "$_ks")"
       case "$st" in DONE|DONE-ERR|FAIL\(*\)|ABANDONED) ;; *) continue ;; esac
     fi
     local window; window="$(meta_field "$m" window)"
@@ -2170,10 +2201,12 @@ cmd_gc() {
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
-    local status; status="$(log_status "$log" "$id" "$kind")"
-    case "$status" in DONE|DONE-ERR|FAIL\(*\)|ABANDONED) ;; *) continue ;; esac
     local window; window="$(meta_field "$m" window)"
     [[ -z "$window" ]] && { [[ "$kind" == "chat" ]] && window="${SESSION}:chat-${id}" || window="${SESSION}:task-${id}"; }
+    local _ws="${window%%:*}"
+    [[ -z "$_ws" || "$_ws" == "$window" ]] && _ws="$SESSION"
+    local status; status="$(log_status "$log" "$id" "$kind" "$_ws")"
+    case "$status" in DONE|DONE-ERR|FAIL\(*\)|ABANDONED) ;; *) continue ;; esac
     local wn="${window##*:}"
     if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$wn"; then
       [[ "$dry_run" == "1" ]] && echo "[dry] kill-window $window" || tmux kill-window -t "$window" 2>/dev/null
