@@ -100,13 +100,22 @@ build_agent_cmd() {
     codex)
       printf 'codex'
       ;;
+    gemini)
+      # Google Gemini CLI (geminicli.com/docs). `-p` is interactive in the
+      # TUI sense — for live panes we just launch the TUI. --model picks
+      # an alternative model, --yolo skips approval prompts.
+      local args=("gemini")
+      [[ -n "$model" ]] && args+=(--model "$model")
+      [[ "$full_auto" == "1" ]] && args+=(--yolo)
+      printf '%s ' "${args[@]}" | sed 's/ $//'
+      ;;
     bash|shell)
       # Plain interactive shell — useful as a "raw terminal" subagent
       # window (manual commands, ad-hoc subagents launched by hand).
       printf 'bash -l'
       ;;
     *)
-      echo "endy live: unknown agent '$agent' (try: claude, cmd, opencode, hermes, codex, bash)" >&2
+      echo "endy live: unknown agent '$agent' (try: claude, cmd, opencode, hermes, codex, gemini, bash)" >&2
       exit 2
       ;;
   esac

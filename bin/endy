@@ -305,7 +305,7 @@ cmd_doctor() {
   printf 'python3 ......... '
   if command -v python3 >/dev/null; then printf '✓ %s\n' "$(python3 --version 2>&1)"; else printf '✗ missing\n'; ok=0; fi
   local agent_ok=0
-  for bin in codex opencode cmd hermes; do
+  for bin in codex opencode cmd hermes gemini; do
     printf '%-15s ' "$bin"
     if command -v "$bin" >/dev/null; then
       agent_ok=1
@@ -408,6 +408,7 @@ cmd_orchestrator() {
     opencode) argv=(opencode) ;;
     cmd|commandcode) argv=(cmd) ;;
     hermes) argv=(hermes chat) ;;
+    gemini) argv=(gemini) ;;
     *) die "unknown orchestrator agent: $agent" ;;
   esac
 
@@ -528,6 +529,8 @@ cmd_ask() {
       exec hermes chat -Q --accept-hooks ${extra[@]+"${extra[@]}"} -q "$prompt" ;;
     claude)
       exec claude ${extra[@]+"${extra[@]}"} -p "$prompt" ;;
+    gemini)
+      exec gemini ${extra[@]+"${extra[@]}"} -p "$prompt" ;;
     *)
       die "unknown agent: $agent" ;;
   esac
@@ -591,6 +594,7 @@ case "${1:-help}" in
   cmd|commandcode) shift; run_agent cmd "$@" ;;
   hermes)   shift; run_agent hermes "$@" ;;
   claude)   shift; run_agent claude "$@" ;;
+  gemini)   shift; run_agent gemini "$@" ;;
 
   help|-h|--help) shift; cmd_help "$@" ;;
 
