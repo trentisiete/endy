@@ -166,6 +166,7 @@ open_manager_windows() {
     open_view_window   agents   'endy watch agents - agentes activos (todas las sesiones)' agents
     open_browse_window --overview --live
   else
+    open_view_window   tree     'endy watch tree - arbol de tareas de esta sesion'         tree --all
     open_browse_window
   fi
   open_docs_window

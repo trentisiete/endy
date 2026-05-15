@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
-# Apply the endy tmux status line and tree window to the session named by
-# $ENDY_SESSION (defaults to "endy" for the global/overview session).
+# Apply the endy tmux status line to the session named by $ENDY_SESSION
+# (defaults to "endy" for the global/overview session).
+#
+# The dashboard windows (tree, sessions, agents, browse, docs) are owned
+# by scripts/start.sh — this script no longer creates a tree window so it
+# doesn't fight start.sh's auto-refreshing dashboard. It only configures
+# the tmux status bar, which is safe to (re)apply at any time.
 
 set -euo pipefail
 
 SESSION="${ENDY_SESSION:-endy}"
-ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=lib/session.sh
-. "${ENDY_ROOT}/scripts/lib/session.sh"
-LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
-scope="per-dir"
-tree_args=""
-if [[ "$SESSION" == "endy" ]]; then
-  scope="overview"
-  tree_args="--overview --live"
-fi
-q_session="$(printf '%q' "$SESSION")"
-q_log_dir="$(printf '%q' "$LOG_DIR")"
-q_endy_root="$(printf '%q' "$ENDY_ROOT")"
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' is not running; run: endy start" >&2
@@ -28,42 +20,14 @@ tmux set-option -t "$SESSION" status on
 tmux set-option -t "$SESSION" status-left '[endy] '
 tmux set-option -t "$SESSION" status-right 'Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach | Ctrl-b & kill window | Ctrl-b x kill pane'
 
+# Defensive cleanup: drop any legacy `help` window from older versions.
 tmux kill-window -t "${SESSION}:help" 2>/dev/null || true
-tmux kill-window -t "${SESSION}:tree" 2>/dev/null || true
-
-tree_cmd="
-refresh_count=0
-refreshes_per_history_clear=3600  # 5 hours at one refresh every 5 seconds.
-while :; do
-  printf '\033[H\033[2J'
-  export ENDY_SESSION=${q_session}
-  export ENDY_LOG_DIR=${q_log_dir}
-  printf '\033[1;36mendy watch tree  (scope=%s session=%s)\033[0m\n' '${scope}' '${SESSION}'
-  printf '\033[1;33mtmux: Ctrl-b w windows | Ctrl-b n/p next/prev | Ctrl-b d detach | Ctrl-b & kill window | Ctrl-b x kill pane\033[0m\n'
-  printf '\033[1;33mendy: watch browse | watch tree --all | watch dir <path> | watch chat <id> | watch kill-all --cwd <path>\033[0m\n\n'
-  ${q_endy_root}/bin/endy watch tree ${tree_args}
-  refresh_count=\$((refresh_count + 1))
-  if [[ \"\$refresh_count\" -ge \"\$refreshes_per_history_clear\" ]]; then
-    tmux clear-history -t ${SESSION}:tree 2>/dev/null || true
-    refresh_count=0
-  fi
-  printf '\n\033[2mrefreshes every 5s; scrollback is pruned every 5h. Ctrl-c stops auto-refresh and leaves this shell.\033[0m\n'
-  sleep 5
-done
-BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
-"
-tmux new-window -t "$SESSION" -n tree -c "$ENDY_ROOT" "bash -lc $(printf '%q' "$tree_cmd")"
 
 cat <<EOF
-tmux status/tree applied to session '${SESSION}'.
+tmux status bar applied to session '${SESSION}'.
 
 tmux commands:
   tmux attach -t ${SESSION}
   tmux select-window -t ${SESSION}:tree
-  tmux kill-window -t ${SESSION}:tree
-
-endy commands:
-  endy watch browse
-  endy watch tree
-  endy watch dir ${ENDY_ROOT}
+  tmux kill-session -t ${SESSION}
 EOF
