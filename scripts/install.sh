@@ -552,39 +552,63 @@ if [[ "$INSTALL_MULTIPLEXOR" == "1" ]]; then
     fi
   fi
 
-  # Set ENDY_HANDOFF_RESOLVER in the user's shell rc as a separate managed
-  # block, regardless of whether the install succeeded — the env var is
-  # harmless when the binary isn't there yet, and the user might install it
-  # later by hand.
-  rc=""
-  case "$(basename "${SHELL:-zsh}")" in
-    zsh)  rc="${HOME}/.zshrc"  ;;
-    bash) rc="${HOME}/.bashrc" ;;
-    *)    rc="" ;;
-  esac
-  if [[ -n "$rc" ]]; then
-    touch "$rc"
-    resolver_begin="# >>> endy ENDY_HANDOFF_RESOLVER (managed by endy install)"
-    resolver_end="# <<< endy ENDY_HANDOFF_RESOLVER"
-    # Strip any prior block then append fresh — same pattern as the PATH block.
-    tmp_rc="$(mktemp)"
+  # Set ENDY_HANDOFF_RESOLVER in the user's shell startup files so it
+  # propagates to BOTH interactive and non-interactive shells. Two-block
+  # strategy because shells differ on what they source when:
+  #
+  #   bash interactive non-login:  ~/.bashrc
+  #   bash login (incl. bash -lc): ~/.profile (or ~/.bash_profile if present)
+  #                                Ubuntu's ~/.bashrc has an early-return
+  #                                guard for non-interactive shells, so a
+  #                                block in ~/.bashrc alone misses bash -lc.
+  #   zsh (all modes):             ~/.zshenv — single best target.
+  #
+  # Idempotent: re-running rewrites the same managed block in place.
+  resolver_begin="# >>> endy ENDY_HANDOFF_RESOLVER (managed by endy install)"
+  resolver_end="# <<< endy ENDY_HANDOFF_RESOLVER"
+
+  write_resolver_block() {
+    local target="$1"
+    [[ -z "$target" ]] && return 0
+    touch "$target"
+    local tmp; tmp="$(mktemp)"
     awk -v b="$resolver_begin" -v e="$resolver_end" '
       $0 == b { skip=1; next }
       $0 == e { skip=0; next }
       !skip   { print }
-    ' "$rc" > "$tmp_rc"
+    ' "$target" > "$tmp"
     {
-      cat "$tmp_rc"
+      cat "$tmp"
       printf '\n%s\n' "$resolver_begin"
       printf 'export ENDY_HANDOFF_RESOLVER="multiplexor-next-provider"\n'
       printf '%s\n'   "$resolver_end"
-    } > "$rc"
-    rm -f "$tmp_rc"
-    ok "wired ENDY_HANDOFF_RESOLVER in $rc"
-  else
-    warn "unknown shell '${SHELL:-?}' — add this to your shell rc manually:"
-    printf '       export ENDY_HANDOFF_RESOLVER="multiplexor-next-provider"\n' >&2
-  fi
+    } > "$target"
+    rm -f "$tmp"
+    ok "wired ENDY_HANDOFF_RESOLVER in $target"
+  }
+
+  case "$(basename "${SHELL:-zsh}")" in
+    zsh)
+      # ~/.zshenv is sourced for ALL zsh modes (interactive, login,
+      # non-interactive). One file, full coverage.
+      write_resolver_block "${HOME}/.zshenv"
+      ;;
+    bash)
+      # Two targets:
+      #   ~/.bashrc       → interactive non-login (e.g. opening a terminal)
+      #   ~/.profile or ~/.bash_profile → login (incl. bash -lc 'cmd')
+      # Both export the same value; idempotent. ~/.bash_profile shadows
+      # ~/.profile when present, so write to whichever exists.
+      bash_profile_target="${HOME}/.profile"
+      [[ -f "${HOME}/.bash_profile" ]] && bash_profile_target="${HOME}/.bash_profile"
+      write_resolver_block "${HOME}/.bashrc"
+      write_resolver_block "$bash_profile_target"
+      ;;
+    *)
+      warn "unknown shell '${SHELL:-?}' — add this to your shell startup manually:"
+      printf '       export ENDY_HANDOFF_RESOLVER="multiplexor-next-provider"\n' >&2
+      ;;
+  esac
 
   if [[ -n "$multiplexor_install_reason" ]]; then
     warn "multiplexor was NOT installed: $multiplexor_install_reason"
