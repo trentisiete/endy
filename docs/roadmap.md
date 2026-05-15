@@ -123,19 +123,42 @@ Generic markers like `Error:` / `Exception:` are deliberately NOT in
 the detector — the patterns are taken from the specific phrases each
 CLI emits in real exhaustion events.
 
-## Phase 5 — Git worktree isolation (next)
+## Phase 5 — Git worktree isolation (shipped)
 
-Two agents working on the same files simultaneously is currently a
-foot-gun. Phase 5 makes every `endy spawn` (optionally) create a fresh
-git worktree under `.endy/worktrees/<task-id>/` so parallel tasks
-literally cannot stomp each other.
+Two agents working on the same files simultaneously was a foot-gun.
+Phase 5 makes every `endy spawn` (optionally) create a fresh git
+worktree under `<repo-root>/.endy/worktrees/<task-id>/` on branch
+`endy/task-<task-id>`, so parallel tasks literally cannot stomp each
+other.
 
-- New flag `--worktree` on `endy spawn` (and default-on for orchestrator
-  windows).
-- Cleanup hook on `endy watch purge` / `endy stop` removes the worktree
-  if no uncommitted changes remain.
+- `scripts/lib/worktree.sh` — three stdlib helpers
+  (`_endy_worktree_create`, `_endy_worktree_safe_to_remove`,
+  `_endy_worktree_remove`). git-only, no extra deps.
+- `endy spawn --worktree` / `--no-worktree` flags. `ENDY_DEFAULT_WORKTREE=1`
+  enables default-on; `cmd_orchestrator` exports it so every spawn
+  initiated from inside an orchestrator window gets isolation by default.
+- Handoff inheritance: `handoff.sh` propagates the parent's worktree
+  verbatim (same dir, same branch, `worktree_inherited=1` in meta).
+  Multi-link chains share one worktree so the next agent picks up
+  exactly where the previous one stopped.
+- Cleanup hooks in `endy watch purge` (per-task, cascades through
+  children) and `endy stop` (per-session). Safety: porcelain must be
+  empty — uncommitted edits are NEVER removed; a `git worktree remove
+  --force` hint is printed instead. Branches are cleaned via `git
+  branch -d` (refuses unmerged → commits survive in refs after the
+  worktree dir is gone).
 - The resolver's view of "which cwd" stays at the original repo root;
-  only the task's `cwd` flips to the worktree.
+  only the task's `cwd` flips to the worktree (`worktree_origin_cwd`
+  recorded for traceability).
+- `state.py` surfaces `worktree_dir` / `worktree_branch` /
+  `worktree_inherited` in the `self` block, and the `## endy
+  environment` block prepended to every spawn now includes a
+  `Git worktree: branch ...` line when one is active, so the agent
+  knows it can edit freely.
+- `tests/smoke-worktree.sh` covers 8 scenarios; the one-shot
+  `tests/exhaustive-phase5.sh` runs 16 categories / 29 checks
+  (regression + visibility in per-dir + overview + per-agent + advanced
+  flows).
 
 ## Phase 6 — Adoption (later)
 

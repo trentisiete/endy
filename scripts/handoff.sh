@@ -149,6 +149,12 @@ PARENT_PROMPT_FILE="$(_meta_field "$PARENT_META" prompt)"
 PARENT_ORCH="$(_meta_field "$PARENT_META" orchestrator)"
 PARENT_ORCH_AGENT="$(_meta_field "$PARENT_META" orchestrator_agent)"
 PARENT_CHAIN="$(_meta_field "$PARENT_META" handoff_chain)"
+# Phase 5: inherit worktree if parent owns one (or already inherited one
+# itself — chain stays on a single worktree per handoff lineage). The
+# child reuses the same dir + branch and records worktree_inherited=1 so
+# cleanup hooks skip it.
+PARENT_WT_DIR="$(_meta_field "$PARENT_META" worktree_dir)"
+PARENT_WT_BRANCH="$(_meta_field "$PARENT_META" worktree_branch)"
 
 [[ -n "$PARENT_ID" ]]    || { echo "handoff: parent meta has no task_id" >&2; exit 3; }
 [[ -n "$PARENT_AGENT" ]] || { echo "handoff: parent meta has no agent" >&2; exit 3; }
@@ -300,6 +306,14 @@ SPAWN_ARGS=(
 [[ -n "$PARENT_ORCH"       ]] && SPAWN_ARGS+=(--orchestrator "$PARENT_ORCH")
 [[ -n "$PARENT_ORCH_AGENT" ]] && SPAWN_ARGS+=(--orchestrator-agent "$PARENT_ORCH_AGENT")
 [[ -n "$reason"            ]] && SPAWN_ARGS+=(--handoff-reason "$reason")
+# Phase 5: propagate the parent's worktree to the child. spawn-long-task.sh
+# will set worktree_inherited=1 in the child meta and skip git worktree
+# add. Cleanup of the worktree happens when the owner (the task that
+# first created it) is purged.
+if [[ -n "$PARENT_WT_DIR" ]]; then
+    SPAWN_ARGS+=(--worktree-inherit-dir "$PARENT_WT_DIR")
+    [[ -n "$PARENT_WT_BRANCH" ]] && SPAWN_ARGS+=(--worktree-inherit-branch "$PARENT_WT_BRANCH")
+fi
 
 # Persona/model: pass through ONLY if both agents support the same persona
 # concept. opencode <-> hermes share --persona semantics partially; cmd and
