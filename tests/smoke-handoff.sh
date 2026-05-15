@@ -72,13 +72,21 @@ grep -q "original task prompt" "$CHILD_PROMPT" && ok "composite prompt includes 
 grep -q "hello-world Python script" "$CHILD_PROMPT" && ok "composite prompt carries parent's text" || fail "parent text not propagated"
 grep -qE "(full output|last [0-9]+ lines) of previous agent" "$CHILD_PROMPT" && ok "composite prompt includes log section" || fail "no log section"
 
-header "4. endy watch list shows ↪ in PARENT column for the child"
+header "4. endy watch list shows ↪ handoff line under the child"
+# The card-style watch list (post-0.5.0) prints the handoff hint on its own
+# sub-line under the cwd of the child row. We assert two things:
+#   (a) the child id appears somewhere in the output, and
+#   (b) the child's ↪ handoff line references the short ref of the parent.
+# The earlier "↪ on the same line as the child id" layout no longer holds.
 LIST_OUT="$(NO_COLOR=1 ENDY_SESSION=$SESSION ENDY_LOG_DIR=$ENDY/.logs/per-dir/$SESSION "$ENDY/bin/endy" watch list)"
 echo "$LIST_OUT"
-echo "$LIST_OUT" | grep "↪" | grep -q "$CHILD_ID" && ok "↪ marker shown for child row" \
-  || fail "child row missing ↪ marker"
-echo "$LIST_OUT" | grep "$CHILD_ID" -A1 | grep -q "↪ handoff from" && ok "handoff sub-line printed" \
-  || fail "handoff sub-line missing"
+echo "$LIST_OUT" | grep -q "$CHILD_ID" && ok "child row visible in list" \
+  || fail "child row missing in list"
+# Parent's short ref is the last 4-hex chunk of the id (e.g. "181517-a419").
+PARENT_SHORT="${PARENT_ID#*-}"; PARENT_SHORT="${PARENT_SHORT#*-}"
+PARENT_TIME_HEX="${PARENT_ID#*-}"
+echo "$LIST_OUT" | grep -q "↪ handoff from $PARENT_TIME_HEX" && ok "↪ handoff line points at parent ($PARENT_TIME_HEX)" \
+  || fail "no ↪ handoff line referencing parent $PARENT_TIME_HEX"
 
 header "5. endy watch tree shows the ↪ handoff sub-line"
 TREE_FILE="$(mktemp)"
