@@ -130,7 +130,12 @@ _find_meta() {
 PARENT_META="$(_find_meta "$parent_prefix")" || exit 3
 
 _meta_field() {
-    grep "^${2}=" "$1" 2>/dev/null | head -1 | cut -d= -f2-
+    # Robust against absent fields: grep returning 1 (no match) AND
+    # pipefail would otherwise abort the script when reading optional
+    # keys like persona=, model=, handoff_chain= that a hand-edited or
+    # minimal meta may omit. Suppress grep's exit code; downstream
+    # commands handle empty input fine.
+    { grep "^${2}=" "$1" 2>/dev/null || true; } | head -1 | cut -d= -f2-
 }
 
 PARENT_ID="$(_meta_field "$PARENT_META" task_id)"

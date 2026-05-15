@@ -67,7 +67,11 @@ _find_meta() {
 
 META_PATH="$(_find_meta "$TASK_ID")" || exit 0
 
-_field() { grep "^${2}=" "$1" 2>/dev/null | head -1 | cut -d= -f2-; }
+_field() {
+    # Robust against absent fields: pipefail would otherwise abort on a
+    # missing optional key (handoff_chain=, auto_handoff=, etc.).
+    { grep "^${2}=" "$1" 2>/dev/null || true; } | head -1 | cut -d= -f2-
+}
 
 LOG_PATH="$(_field "$META_PATH" log)"
 AGENT="$(_field "$META_PATH" agent)"
