@@ -217,12 +217,79 @@ def _compose_tiers(cwd):
 # main state composer
 # ---------------------------------------------------------------------------
 
+def _derive_wt_fields(meta):
+    """Phase 5.2: compute live git counters for the worktree referenced by
+    `meta`. Returns a dict with 5 keys (all values nullable). Empty dict
+    when there is no worktree_dir or it's gone.
+
+    All git calls have a 1s timeout. On any failure we leave the field
+    None instead of poisoning the JSON / prompt.
+    """
+    wt = meta.get("worktree_dir") or ""
+    origin = meta.get("worktree_origin_cwd") or ""
+    if not wt:
+        return {}
+    wt_path = Path(wt)
+    if not wt_path.is_dir():
+        return {}
+
+    out = {
+        "commits_ahead": None,
+        "porcelain_modified": None,
+        "porcelain_untracked": None,
+        "origin_branch": None,
+        "chain_size": None,
+    }
+
+    if origin and Path(origin).is_dir():
+        origin_head = _run(["git", "-C", origin, "rev-parse", "HEAD"], timeout=1).strip()
+        if origin_head:
+            cnt = _run(["git", "-C", wt, "rev-list", "--count", f"{origin_head}..HEAD"],
+                       timeout=1).strip()
+            try:
+                out["commits_ahead"] = int(cnt) if cnt else None
+            except ValueError:
+                pass
+        ob = _run(["git", "-C", origin, "symbolic-ref", "--short", "HEAD"], timeout=1).strip()
+        if ob:
+            out["origin_branch"] = ob
+
+    porc = _run(["git", "-C", wt, "status", "--porcelain"], timeout=1)
+    if porc is not None:
+        mod = untr = 0
+        for line in porc.splitlines():
+            if line.startswith("??"):
+                untr += 1
+            elif line.strip():
+                mod += 1
+        out["porcelain_modified"] = mod
+        out["porcelain_untracked"] = untr
+
+    # chain_size = how many tasks (inheritors + owner) share this worktree.
+    # One disk walk; cheap for typical .logs/ sizes (dozens of metas).
+    try:
+        cnt = 0
+        for m in _iter_meta_files():
+            d = _read_meta(m)
+            if d.get("worktree_dir") == wt:
+                cnt += 1
+        out["chain_size"] = cnt
+    except OSError:
+        pass
+
+    return out
+
+
 def _self_from_meta(meta_path, meta):
     """Build the `self` block from a parsed meta dict.
 
     The worktree_* fields are Phase 5: when present, the task is running
     in an isolated git worktree (see SKILL.md / docs/roadmap.md Phase 5).
+    Phase 5.2 enriches the block with 5 live git counters
+    (commits_ahead, porcelain_modified, porcelain_untracked,
+    origin_branch, chain_size) — null when not derivable.
     """
+    derived = _derive_wt_fields(meta)
     return {
         "task_id": meta.get("task_id") or "",
         "agent": meta.get("agent") or "",
@@ -237,6 +304,11 @@ def _self_from_meta(meta_path, meta):
         "worktree_branch": meta.get("worktree_branch") or "",
         "worktree_origin_cwd": meta.get("worktree_origin_cwd") or "",
         "worktree_inherited": meta.get("worktree_inherited") or "",
+        "worktree_commits_ahead": derived.get("commits_ahead"),
+        "worktree_porcelain_modified": derived.get("porcelain_modified"),
+        "worktree_porcelain_untracked": derived.get("porcelain_untracked"),
+        "worktree_origin_branch": derived.get("origin_branch"),
+        "worktree_chain_size": derived.get("chain_size"),
     }
 
 
@@ -501,6 +573,35 @@ def render_prompt(state):
             tag = " (inherited from previous link)" if wt_inherited else ""
             out.append(f"Git worktree: branch `{wt_branch}` "
                        f"(origin repo: `{wt_origin}`){tag}.")
+            # Phase 5.2 — live counters. Each follow-up line is conditional
+            # on having content; an agent in a clean wt with no commits sees
+            # only the branch line above.
+            commits = s.get("worktree_commits_ahead") or 0
+            mod = s.get("worktree_porcelain_modified") or 0
+            untr = s.get("worktree_porcelain_untracked") or 0
+            origin_branch = s.get("worktree_origin_branch")
+            if commits > 0 or mod > 0 or untr > 0:
+                parts = []
+                if commits > 0:
+                    target = f"`{origin_branch}`" if origin_branch else "origin"
+                    parts.append(
+                        f"{commits} commit{'s' if commits != 1 else ''} "
+                        f"ahead of {target}"
+                    )
+                if mod > 0 or untr > 0:
+                    total = mod + untr
+                    parts.append(
+                        f"{mod} modified + {untr} untracked "
+                        f"file{'s' if total != 1 else ''} in your dir"
+                    )
+                out.append("  → " + ", ".join(parts) + ".")
+            chain = s.get("worktree_chain_size") or 1
+            if chain > 1:
+                other = chain - 1
+                out.append(
+                    f"  → {other} other link{'s' if other != 1 else ''} "
+                    f"in this handoff chain share this worktree."
+                )
         out.append("")
 
     chain_block, full_len = _render_chain_block(lin, (s.get("agent") if s else "?"))

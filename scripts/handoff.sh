@@ -155,6 +155,7 @@ PARENT_CHAIN="$(_meta_field "$PARENT_META" handoff_chain)"
 # cleanup hooks skip it.
 PARENT_WT_DIR="$(_meta_field "$PARENT_META" worktree_dir)"
 PARENT_WT_BRANCH="$(_meta_field "$PARENT_META" worktree_branch)"
+PARENT_WT_ORIGIN_CWD="$(_meta_field "$PARENT_META" worktree_origin_cwd)"
 
 [[ -n "$PARENT_ID" ]]    || { echo "handoff: parent meta has no task_id" >&2; exit 3; }
 [[ -n "$PARENT_AGENT" ]] || { echo "handoff: parent meta has no agent" >&2; exit 3; }
@@ -313,6 +314,10 @@ SPAWN_ARGS=(
 if [[ -n "$PARENT_WT_DIR" ]]; then
     SPAWN_ARGS+=(--worktree-inherit-dir "$PARENT_WT_DIR")
     [[ -n "$PARENT_WT_BRANCH" ]] && SPAWN_ARGS+=(--worktree-inherit-branch "$PARENT_WT_BRANCH")
+    # Phase 5.2: propagate origin_cwd separately from --cwd. The child's cwd
+    # becomes the worktree dir, but the meta needs the TRUE origin repo so
+    # `commits_ahead` in state.py compares against the right HEAD.
+    [[ -n "$PARENT_WT_ORIGIN_CWD" ]] && SPAWN_ARGS+=(--worktree-origin-cwd "$PARENT_WT_ORIGIN_CWD")
 fi
 
 # Persona/model: pass through ONLY if both agents support the same persona

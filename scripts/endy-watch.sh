@@ -3421,14 +3421,247 @@ EOF
 
 # ---------------------------------------------------------------------------
 # worktrees — list active worktrees with live git counters.
+#
+# Default = interactive fzf picker when stdout is a TTY + fzf installed;
+# falls back to the human cards body otherwise. --format / --no-fzf select
+# the non-interactive path explicitly.
 # ---------------------------------------------------------------------------
+
+# Preview pane for the picker. Reads-only, runs many times per second.
+_cmd_wt_preview() {
+  local id_prefix="${1:-}"
+  [[ -n "$id_prefix" ]] || return 0
+  local id meta wt origin_cwd
+  IFS=$'\t' read -r id meta wt origin_cwd \
+    < <(_endy_resolve_wt_target "$id_prefix" "wt-preview" 2>/dev/null) || return 0
+
+  local branch; branch="$(meta_field "$meta" worktree_branch)"
+  local agent;  agent="$(meta_field "$meta" agent)"
+  local origin_head=""
+  [[ -d "$origin_cwd" ]] && origin_head="$(cd "$origin_cwd" && git rev-parse HEAD 2>/dev/null)" || true
+
+  printf '%sbranch:%s %s\n' "$C_BOLD" "$C_RST" "${branch:-?}"
+  printf '%sagent:%s  %s\n' "$C_BOLD" "$C_RST" "${agent:-?}"
+  printf '%spath:%s   %s\n' "$C_BOLD" "$C_RST" "$wt"
+  printf '%sorigin:%s %s\n\n' "$C_BOLD" "$C_RST" "${origin_cwd:-?}"
+
+  printf '%s── commits ahead of origin ──%s\n' "$C_DIM" "$C_RST"
+  if [[ -n "$origin_head" ]]; then
+    local logs
+    logs="$(cd "$wt" 2>/dev/null && git log --pretty='format:%C(auto)%h %s' "${origin_head}..HEAD" 2>/dev/null | head -10)"
+    if [[ -n "$logs" ]]; then
+      printf '%s\n' "$logs"
+    else
+      printf '%s(none — agent has not committed yet)%s\n' "$C_DIM" "$C_RST"
+    fi
+  else
+    printf '%s(origin head unreadable)%s\n' "$C_DIM" "$C_RST"
+  fi
+  printf '\n'
+
+  printf '%s── porcelain status ──%s\n' "$C_DIM" "$C_RST"
+  local porc; porc="$(cd "$wt" 2>/dev/null && git status --short 2>/dev/null)"
+  if [[ -n "$porc" ]]; then
+    printf '%s\n' "$porc" | head -15
+  else
+    printf '%s(clean)%s\n' "$C_DIM" "$C_RST"
+  fi
+  printf '\n'
+
+  printf '%s── owner log tail ──%s\n' "$C_DIM" "$C_RST"
+  local owner_log; owner_log="$(meta_field "$meta" log)"
+  if [[ -f "$owner_log" ]]; then
+    tail -n 12 "$owner_log"
+  else
+    printf '%s(no log file)%s\n' "$C_DIM" "$C_RST"
+  fi
+}
+
+# Ctrl-S handler — git status inside the worktree.
+_cmd_wt_status() {
+  local id_prefix="${1:-}"
+  [[ -n "$id_prefix" ]] || return 0
+  local id meta wt origin_cwd
+  IFS=$'\t' read -r id meta wt origin_cwd \
+    < <(_endy_resolve_wt_target "$id_prefix" "wt-status") || return 1
+  printf 'Worktree: %s\nBranch:   %s\n\n' "$wt" "$(meta_field "$meta" worktree_branch)"
+  ( cd "$wt" && git status )
+  printf '\n%sPress any key to dismiss...%s' "$C_DIM" "$C_RST"
+  read -rsn1 _
+  printf '\n'
+}
+
+# Ctrl-M handler — merge assistant. Refuses on dirty wt (no auto-commit).
+_cmd_wt_merge() {
+  local id_prefix="${1:-}"
+  [[ -n "$id_prefix" ]] || return 0
+  local id meta wt origin_cwd
+  IFS=$'\t' read -r id meta wt origin_cwd \
+    < <(_endy_resolve_wt_target "$id_prefix" "wt-merge") || return 1
+
+  local porc; porc="$(cd "$wt" && git status --porcelain 2>/dev/null)"
+  if [[ -n "$porc" ]]; then
+    printf '%s✗ Refusing to merge: worktree has uncommitted changes.%s\n\n' "$C_RED" "$C_RST"
+    printf '%sCommit, stash, or discard before merging. git status --short:%s\n\n' "$C_DIM" "$C_RST"
+    printf '%s\n' "$porc"
+    printf '\n%sPress any key to dismiss...%s' "$C_DIM" "$C_RST"
+    read -rsn1 _
+    printf '\n'
+    return 1
+  fi
+
+  local branch; branch="$(meta_field "$meta" worktree_branch)"
+  local origin_head=""
+  [[ -d "$origin_cwd" ]] && origin_head="$(cd "$origin_cwd" && git rev-parse HEAD 2>/dev/null)" || true
+  local origin_branch; origin_branch="$(_endy_wt_origin_branch "$origin_cwd")"
+
+  printf '%sMerge assistant%s\n' "$C_BOLD" "$C_RST"
+  printf '%sfrom:%s %s\n' "$C_DIM" "$C_RST" "$branch"
+  printf '%sinto:%s %s @ %s\n\n' "$C_DIM" "$C_RST" "${origin_branch:-?}" "$origin_cwd"
+
+  if [[ -n "$origin_head" ]]; then
+    printf '%scommits:%s\n' "$C_BOLD" "$C_RST"
+    git -C "$wt" log --oneline "${origin_head}..HEAD" 2>/dev/null | head -20
+    printf '\n%sdiffstat:%s\n' "$C_BOLD" "$C_RST"
+    git -C "$wt" diff --stat "${origin_head}..HEAD" 2>/dev/null
+    printf '\n'
+  fi
+
+  printf '%sMerge %s → %s ? [y/N] %s' "$C_BOLD" "$branch" "${origin_branch:-?}" "$C_RST"
+  local ans=""
+  read -r ans
+  if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+    if ( cd "$origin_cwd" && git merge --no-ff "$branch" ); then
+      printf '%s✓ Merged.%s\n' "$C_GRN" "$C_RST"
+    else
+      printf '%s✗ Merge failed. Resolve manually in %s.%s\n' "$C_RED" "$origin_cwd" "$C_RST"
+    fi
+  else
+    printf '%sAborted.%s\n' "$C_DIM" "$C_RST"
+  fi
+  printf '\n%sPress any key to dismiss...%s' "$C_DIM" "$C_RST"
+  read -rsn1 _
+  printf '\n'
+}
+
+# Picker — fzf-driven UI. Re-uses cmd_worktrees --format json --no-fzf to
+# obtain data; python3 parses + emits tab-separated rows.
+_cmd_worktrees_picker() {
+  local only_dirty="$1" only_stale="$2" stale_secs="$3" repo_filter="$4"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "endy watch worktrees: python3 required for the picker — falling back to human." >&2
+    _cmd_worktrees_fallback_human "$only_dirty" "$only_stale" "$stale_secs" "$repo_filter"
+    return 0
+  fi
+
+  local args=(--format json --no-fzf)
+  [[ "$AGGREGATE" == "1" ]] && args+=(--all)
+  [[ "$only_dirty" == "1" ]] && args+=(--dirty)
+  [[ "$only_stale" == "1" ]] && args+=(--stale)
+  [[ -n "$repo_filter" ]] && args+=(--repo "$repo_filter")
+  args+=(--stale-secs "$stale_secs")
+
+  local json
+  json="$( cmd_worktrees "${args[@]}" 2>/dev/null )"
+  [[ -n "$json" ]] || { printf '%s(picker received empty JSON)%s\n' "$C_DIM" "$C_RST"; return 0; }
+
+  local rows
+  rows="$(printf '%s' "$json" | python3 - <<'PY'
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for w in d.get("worktrees", []):
+    owner  = w.get("owner_task_id","")
+    branch = w.get("branch","")
+    status = w.get("status","?")
+    cmts   = w.get("commits_ahead") or 0
+    mod    = w.get("porcelain_modified") or 0
+    untr   = w.get("porcelain_untracked") or 0
+    chain  = w.get("chain_size") or 1
+    sess   = w.get("owner_session","")
+    wt     = w.get("dir","")
+    chips = []
+    if cmts > 0: chips.append(f"↑{cmts}")
+    if mod or untr: chips.append(f"✗{mod}M{untr}U")
+    if chain > 1: chips.append(f"⛓{chain}")
+    chip_s = "  ".join(chips) if chips else "—"
+    print("\t".join([owner, branch, status, chip_s, sess, wt]))
+PY
+  )"
+
+  if [[ -z "$rows" ]]; then
+    printf '%s(no active worktrees matching filters)%s\n' "$C_DIM" "$C_RST"
+    [[ "$AGGREGATE" == "0" ]] && printf '%shint: try --all%s\n' "$C_DIM" "$C_RST"
+    return 0
+  fi
+
+  local clipboard_cmd=""
+  if   command -v clip.exe >/dev/null 2>&1; then clipboard_cmd="clip.exe"
+  elif command -v wl-copy  >/dev/null 2>&1; then clipboard_cmd="wl-copy"
+  elif command -v xclip    >/dev/null 2>&1; then clipboard_cmd="xclip -selection clipboard"
+  elif command -v pbcopy   >/dev/null 2>&1; then clipboard_cmd="pbcopy"
+  fi
+
+  local self="${BASH_SOURCE[0]}"
+  local preview_cmd="ENDY_FORCE_COLOR=1 '$self' _wt_preview {1}"
+
+  local binds=(
+    "--bind=enter:execute('$self' _jump {1})+abort"
+    "--bind=ctrl-e:execute-silent('$self' wt-open {1})"
+    "--bind=ctrl-d:execute('$self' wt-diff {1} | less -R)"
+    "--bind=ctrl-l:execute('$self' wt-log  {1} | less -R)"
+    "--bind=ctrl-s:execute('$self' _wt_status {1})"
+    "--bind=ctrl-m:execute('$self' _wt_merge  {1})"
+    "--bind=ctrl-k:execute('$self' purge {1} --from-picker)+abort"
+    "--bind=ctrl-r:refresh-preview"
+  )
+  [[ -n "$clipboard_cmd" ]] && binds+=("--bind=ctrl-y:execute-silent(printf %s {6} | ${clipboard_cmd})")
+
+  local header
+  if [[ -n "$clipboard_cmd" ]]; then
+    printf -v header ' %s   %s   %s   %s   %s\n %s   %s   %s   %s' \
+      'enter→jump' 'ctrl-e→editor' 'ctrl-d→diff' 'ctrl-l→log' 'ctrl-s→status' \
+      'ctrl-m→merge' 'ctrl-y→copy path' 'ctrl-k→purge' 'esc→salir'
+  else
+    printf -v header ' %s   %s   %s   %s   %s\n %s   %s   %s' \
+      'enter→jump' 'ctrl-e→editor' 'ctrl-d→diff' 'ctrl-l→log' 'ctrl-s→status' \
+      'ctrl-m→merge' 'ctrl-k→purge' 'esc→salir   (install clip/xclip for copy)'
+  fi
+
+  printf '%s\n' "$rows" \
+    | fzf --ansi --reverse \
+          --delimiter=$'\t' \
+          --with-nth=2,3,4,5 \
+          --header="$header" \
+          --header-first \
+          --preview "$preview_cmd" \
+          --preview-window=right:55%:wrap \
+          --no-mouse \
+          "${binds[@]}" >/dev/null
+}
+
+_cmd_worktrees_fallback_human() {
+  local args=(--format human --no-fzf)
+  [[ "$AGGREGATE" == "1" ]] && args+=(--all)
+  [[ "$1" == "1" ]] && args+=(--dirty)
+  [[ "$2" == "1" ]] && args+=(--stale)
+  [[ -n "$4" ]] && args+=(--repo "$4")
+  args+=(--stale-secs "$3")
+  cmd_worktrees "${args[@]}"
+}
 
 cmd_worktrees() {
   local fmt="human"
+  local fmt_explicit=0
   local only_dirty=0
   local only_stale=0
   local stale_secs=3600
   local repo_filter=""
+  local no_fzf=0
+  local force_picker=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --all|-a) AGGREGATE=1; shift ;;
@@ -3436,11 +3669,14 @@ cmd_worktrees() {
       --dirty) only_dirty=1; shift ;;
       --stale) only_stale=1; shift ;;
       --stale-secs) stale_secs="$2"; shift 2 ;;
-      --format) fmt="$2"; shift 2 ;;
+      --format) fmt="$2"; fmt_explicit=1; shift 2 ;;
+      --no-fzf|--no-picker) no_fzf=1; shift ;;
+      --pick|--picker) force_picker=1; shift ;;
       -h|--help)
         cat <<'EOF'
 usage: endy watch worktrees [--all] [--repo <path>] [--dirty] [--stale]
                             [--stale-secs <N>] [--format human|json]
+                            [--no-fzf | --pick]
 
 List active git worktrees created by endy tasks, with live counters.
 
@@ -3450,8 +3686,21 @@ List active git worktrees created by endy tasks, with live counters.
   --stale        keep only worktrees idle for >= stale-secs (default 3600).
   --stale-secs N override the staleness threshold (in seconds).
   --format       output format: human (default, cards) or json.
+  --pick         force the fzf picker (default when stdout is a TTY + fzf).
+  --no-fzf       force non-TUI output even on an interactive terminal.
 
-Each card / object exposes:
+Picker bindings:
+  Enter   jump to the owner task's tmux window
+  Ctrl-E  open the worktree dir in your editor (wt-open)
+  Ctrl-D  show wt-diff in less
+  Ctrl-L  show wt-log in less
+  Ctrl-S  git status for the worktree
+  Ctrl-M  merge assistant (refuses if porcelain dirty)
+  Ctrl-Y  copy worktree path to clipboard
+  Ctrl-K  purge the owner task (cascade — same as `endy watch purge`)
+  Esc     exit
+
+Each card / JSON object exposes:
   branch, dir, origin_cwd, origin_branch, owner_task_id, owner_session,
   owner_agent, status, commits_ahead, porcelain_modified,
   porcelain_untracked, chain_size, last_activity_epoch, age_seconds.
@@ -3466,6 +3715,20 @@ EOF
     human|json) ;;
     *) echo "endy watch worktrees: --format must be 'human' or 'json'" >&2; return 2 ;;
   esac
+
+  # Decide picker vs render. The picker fires only when:
+  #   (a) --pick was passed explicitly, OR
+  #   (b) auto-detect: --no-fzf NOT set, no explicit --format, interactive
+  #       stdin+stdout, AND fzf is on PATH. This keeps pipelines and
+  #       --format json deterministic.
+  local fzf_ok=0
+  command -v fzf >/dev/null 2>&1 && fzf_ok=1
+  if [[ "$force_picker" == "1" ]] \
+     || ( [[ "$no_fzf" == "0" ]] && [[ "$fmt_explicit" == "0" ]] \
+          && [[ -t 1 ]] && [[ -t 0 ]] && [[ "$fzf_ok" == "1" ]] ); then
+    _cmd_worktrees_picker "$only_dirty" "$only_stale" "$stale_secs" "$repo_filter"
+    return $?
+  fi
 
   if [[ -n "$repo_filter" ]]; then
     local resolved
@@ -3728,6 +3991,9 @@ case "${1:-attach}" in
   wt-diff)       shift; cmd_wt_diff "$@" ;;
   wt-log)        shift; cmd_wt_log "$@" ;;
   worktrees|wts) shift; cmd_worktrees "$@" ;;
+  _wt_preview)   shift; _cmd_wt_preview "$@" ;;
+  _wt_status)    shift; _cmd_wt_status "$@" ;;
+  _wt_merge)     shift; _cmd_wt_merge "$@" ;;
   -h|--help|help)
     sed -n '2,81p' "$0"
     ;;

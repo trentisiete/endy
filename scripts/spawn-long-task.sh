@@ -53,6 +53,7 @@ no_auto_handoff=0
 worktree_flag="auto"
 worktree_inherit_dir=""
 worktree_inherit_branch=""
+worktree_origin_override=""
 resume_id=""
 parent_task=""
 handoff_from=""
@@ -85,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --no-worktree)  worktree_flag="off"; shift   ;;
     --worktree-inherit-dir)     worktree_inherit_dir="$2";    shift 2 ;;
     --worktree-inherit-branch)  worktree_inherit_branch="$2"; shift 2 ;;
+    --worktree-origin-cwd)      worktree_origin_override="$2"; shift 2 ;;
     --max-turns)    max_turns="$2";    shift 2 ;;
     --resume)         resume_id="$2";     shift 2 ;;
     --parent-task)    parent_task="$2";   shift 2 ;;
@@ -142,7 +144,11 @@ WINDOW_NAME="task-${TASK_ID}"
 # non-worktree behavior unchanged.
 worktree_dir=""
 worktree_branch=""
-worktree_origin_cwd="$cwd"
+# Default: the cwd we were handed is the origin repo (caller is in the main
+# worktree). The handoff path overrides this via --worktree-origin-cwd so
+# that the child meta carries the TRUE origin repo path — not the inherited
+# worktree dir, which becomes the new $cwd a few lines below.
+worktree_origin_cwd="${worktree_origin_override:-$cwd}"
 worktree_inherited=""
 worktree_skip_reason=""
 

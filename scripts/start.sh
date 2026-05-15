@@ -3,16 +3,18 @@
 #
 # Layout (per-dir mode):
 #   orchestrator  — interactive Codex in the project cwd
-#   tree          — `endy watch tree`     auto-refreshing task tree
-#   list          — `endy watch list`     interactive fzf picker (peek preview)
-#   handoffs      — `endy watch handoffs` per-session handoff chains
-#   browse        — `endy watch browse`   interactive picker
+#   tree          — `endy watch tree`       auto-refreshing task tree
+#   list          — `endy watch list`       interactive fzf picker (peek preview)
+#   handoffs      — `endy watch handoffs`   per-session handoff chains
+#   worktrees     — `endy watch worktrees`  live git worktrees in this session
+#   browse        — `endy watch browse`     interactive picker
 #   docs          — README / NEXT_STEPS
 #
 # Layout (overview mode — pure management session, no orchestrator):
 #   tree          — `endy watch tree --overview --live --all`
 #   list          — `endy watch list --picker --overview`
 #   handoffs      — `endy watch handoffs`
+#   worktrees     — `endy watch worktrees --all`
 #   browse        — `endy watch browse --overview --live`
 #   docs          — README / NEXT_STEPS
 #
@@ -103,6 +105,14 @@ cleanup_runtime_windows() {
 # Open a read-only `endy watch <view>` window that re-runs the view every 2s.
 # Args: <window-name> <title-text> <endy-watch-args...>
 open_view_window() {
+  # Optional first arg: --refresh=N overrides ENDY_REFRESH_INTERVAL inside
+  # this window only (default for everything else stays 2s). Used by the
+  # worktrees window where each tick runs ~3 git calls per worktree, so a
+  # coarser tick saves CPU at no UX cost.
+  local override_refresh=""
+  if [[ "${1-}" == --refresh=* ]]; then
+    override_refresh="${1#--refresh=}"; shift
+  fi
   local window="$1"; shift
   local title="$1"; shift
   local q_session q_log_dir q_endy_root q_args=""
@@ -111,6 +121,11 @@ open_view_window() {
   q_endy_root="$(printf '%q' "$ENDY_ROOT")"
   local a
   for a in "$@"; do q_args+=" $(printf '%q' "$a")"; done
+
+  local refresh_export=""
+  if [[ -n "$override_refresh" ]]; then
+    refresh_export="export ENDY_REFRESH_INTERVAL=$(printf '%q' "$override_refresh")"
+  fi
 
   kill_window_if_exists "$window"
   # The cd at the start of each loop iteration is defensive: if a global
@@ -122,6 +137,7 @@ open_view_window() {
   tmux new-window -t "$SESSION" -n "$window" -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
+${refresh_export}
 # Force ANSI color from inside endy: the pipe to awk below makes stdout
 # a pipe (not a tty) for endy, so its [-t 1] color autodetect would
 # return false and strip every color. ENDY_FORCE_COLOR overrides that.
@@ -234,6 +250,7 @@ open_manager_windows() {
   kill_window_if_exists panel
   kill_window_if_exists watch
   kill_window_if_exists help
+  kill_window_if_exists worktrees
 
   # show_all controls --live (filter dead sessions) vs --all (include
   # finished tasks). Defaults: overview=true, per-dir=false.
@@ -246,6 +263,7 @@ open_manager_windows() {
     open_view_window        tree     'endy watch tree - arbol de tareas (todas las sesiones)'   "${tree_args[@]}"
     open_list_picker_window
     open_view_window        handoffs 'endy watch handoffs - cadenas de handoff por sesion'      handoffs
+    open_view_window --refresh=5 worktrees 'endy watch worktrees - git worktrees activos (cross-session)' worktrees --all --no-fzf
     open_browse_window "${browse_args[@]}"
   else
     tree_args=(tree --all)
@@ -254,6 +272,7 @@ open_manager_windows() {
     open_view_window        tree     'endy watch tree - arbol de tareas de esta sesion'         "${tree_args[@]}"
     open_list_picker_window
     open_view_window        handoffs 'endy watch handoffs - cadenas de handoff'                 handoffs
+    open_view_window --refresh=5 worktrees 'endy watch worktrees - git worktrees activos en esta sesion' worktrees --no-fzf
     open_browse_window "${browse_args[@]}"
   fi
   open_docs_window
