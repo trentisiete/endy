@@ -4,13 +4,15 @@
 # Layout (per-dir mode):
 #   orchestrator  — interactive Codex in the project cwd
 #   tree          — `endy watch tree`     auto-refreshing task tree
-#   list          — `endy watch list`     per-task detail with ids
+#   list          — `endy watch list`     interactive fzf picker (peek preview)
+#   handoffs      — `endy watch handoffs` per-session handoff chains
 #   browse        — `endy watch browse`   interactive picker
 #   docs          — README / NEXT_STEPS
 #
 # Layout (overview mode — pure management session, no orchestrator):
 #   tree          — `endy watch tree --overview --live --all`
-#   list          — `endy watch list --overview`
+#   list          — `endy watch list --picker --overview`
+#   handoffs      — `endy watch handoffs`
 #   browse        — `endy watch browse --overview --live`
 #   docs          — README / NEXT_STEPS
 #
@@ -222,12 +224,14 @@ open_manager_windows() {
   kill_window_if_exists help
 
   if [[ "$mode" == "overview" ]]; then
-    open_view_window        tree  'endy watch tree - arbol de tareas (todas las sesiones)'  tree --overview --live --all
+    open_view_window        tree     'endy watch tree - arbol de tareas (todas las sesiones)'   tree --overview --live --all
     open_list_picker_window
+    open_view_window        handoffs 'endy watch handoffs - cadenas de handoff por sesion'      handoffs
     open_browse_window --overview --live
   else
-    open_view_window        tree  'endy watch tree - arbol de tareas de esta sesion'        tree --all
+    open_view_window        tree     'endy watch tree - arbol de tareas de esta sesion'         tree --all
     open_list_picker_window
+    open_view_window        handoffs 'endy watch handoffs - cadenas de handoff'                 handoffs
     open_browse_window
   fi
   open_docs_window
