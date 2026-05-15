@@ -1,7 +1,7 @@
 {
   "name": "@noetiklab/endy",
   "version": "0.3.0",
-  "description": "Multi-agent control plane for coding CLIs (codex, opencode, cmd, hermes) — tmux-based orchestration, web dashboard.",
+  "description": "Hand a coding task from one CLI agent to another when its free tier runs out. tmux-based control plane for codex, opencode, cmd, hermes, gemini.",
   "bin": { "endy": "bin/endy" },
   "scripts": {
     "postinstall": "node scripts/postinstall.js"
@@ -14,14 +14,30 @@
     "commandcode/",
     "mcp-shims/",
     "web/",
+    "docs/",
     "AGENTS.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "os": ["darwin", "linux"],
   "engines": { "node": ">=18" },
   "homepage": "https://github.com/trentisiete/endy",
   "repository": { "type": "git", "url": "git+https://github.com/trentisiete/endy.git" },
   "bugs": { "url": "https://github.com/trentisiete/endy/issues" },
-  "keywords": ["tmux", "multi-agent", "codex", "opencode", "claude", "agent-orchestration"],
+  "keywords": [
+    "tmux",
+    "multi-agent",
+    "agent-orchestration",
+    "free-tier",
+    "handoff",
+    "codex",
+    "opencode",
+    "commandcode",
+    "kimi",
+    "hermes",
+    "nous-research",
+    "gemini-cli",
+    "claude-code"
+  ],
   "license": "MIT"
 }
