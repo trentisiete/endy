@@ -44,7 +44,8 @@
 #                                              agents: opencode, cmd, claude, hermes, gemini,
 #                                                      bash (offline stub for testing).
 #                                              opts: --reason "<text>", --instructions "<text>",
-#                                                    --lines N (default 80), --stop-parent,
+#                                                    --lines N (opt-in cap; default is the full log),
+#                                                    --stop-parent,
 #                                                    --no-attach.
 #
 # Watching
