@@ -61,6 +61,23 @@
 #                                 .logs/ and kill their tmux windows. Double
 #                                 confirmation required (type '&', then the full
 #                                 task id). Aliases: delete, purge-session.
+#   endy-watch wt-open <id> [--editor <bin>] [--reuse]
+#                                 Open the task's git worktree dir in your
+#                                 editor ($ENDY_EDITOR → code → cursor → $EDITOR).
+#                                 No-op if the task has no worktree. WSL paths
+#                                 are converted with wslpath -w automatically.
+#   endy-watch worktrees [--all] [--repo <path>] [--dirty] [--stale]
+#                                 [--format human|json]
+#                                 List active worktrees with live git counters
+#                                 (commits ahead, modified/untracked files,
+#                                 chain size, last activity). --all aggregates
+#                                 across every per-dir session.
+#   endy-watch wt-diff <id> [--stat | --files]
+#                                 Diff between the task's worktree HEAD and the
+#                                 origin repo HEAD. Plain stdout, no TUI.
+#   endy-watch wt-log <id> [--since <when>] [--pretty <fmt>]
+#                                 Log of commits the agent made on its worktree
+#                                 branch (relative to origin HEAD).
 #   endy-watch help               This text.
 
 set -u
@@ -70,6 +87,8 @@ ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ENDY_ROOT}/scripts/lib/session.sh"
 # shellcheck source=lib/worktree.sh
 . "${ENDY_ROOT}/scripts/lib/worktree.sh"
+# shellcheck source=lib/editor.sh
+. "${ENDY_ROOT}/scripts/lib/editor.sh"
 SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
 LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 
@@ -106,8 +125,14 @@ fi
 # ---------------------------------------------------------------------------
 
 require_session() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "no '$SESSION' tmux session running — start it with scripts/start.sh" >&2
+  # Permissive: succeed if ANY endy* session is running. Picker bindings
+  # often act cross-session — the user is in `endy` (overview) but the
+  # task lives in `endy-projA`. The previous strict check on $SESSION
+  # rejected those with "no 'X' tmux session running" and made the
+  # picker look like it just reloaded after every Enter/Ctrl-K. The
+  # actual target session is verified by callers via meta.window.
+  if ! tmux list-sessions -F '#S' 2>/dev/null | grep -qE '^endy(-|$)'; then
+    echo "no endy* tmux session running — start one with 'endy start' or 'endy overview'" >&2
     exit 1
   fi
 }
@@ -2339,21 +2364,23 @@ cmd_attach() {
     cat <<'EOF'
 usage: endy watch attach [<id-prefix>] [--strict]
 
-Attaches the current terminal to the endy tmux session. Default mode is
-read-write (Ctrl-b N still navigates). --strict makes it true read-only
-(blocks the tmux prefix too — use only when you really do not want to
-type into agent panes).
+Focuses the agent's tmux pane.
 
-If <id-prefix> is given, focuses that task's window after attach.
+When called from inside a tmux session (the typical case — you are in
+the picker), uses `tmux switch-client` to retarget the current client
+to the agent's session and select its window. Falls back to
+`tmux attach` only when called from outside tmux.
+
+  <id-prefix>   focus that task's window
+  --strict      true read-only (only meaningful for outside-tmux attach)
 EOF
     return 0
   fi
-  if [[ ! -t 1 ]]; then
-    echo "endy watch attach needs an interactive terminal (stdout is not a tty)" >&2
-    echo "usage: endy watch attach [<id-prefix>] [--strict]" >&2
-    exit 2
-  fi
-  require_session
+  # NOT calling require_session here on purpose: the target session is
+  # the task's own (read off its meta), not $SESSION. require_session
+  # would reject every cross-session attach with "no 'X' tmux session
+  # running" even when the task's session is alive. We verify the
+  # target itself a few lines down.
   local strict=0
   local prefix=""
   while [[ $# -gt 0 ]]; do
@@ -2363,22 +2390,64 @@ EOF
     esac
   done
 
-  local flags=()
-  # Default: read-write so you can navigate between windows (Ctrl-b N etc.).
-  # tmux's '-r' read-only mode blocks the prefix key too, which makes the
-  # session unusable for monitoring more than one task. Use --strict only
-  # when you specifically want to prevent typing into running agent panes.
-  [[ "$strict" == "1" ]] && flags+=(-r)
-
+  # Resolve the target session:window we want the user to see.
+  local target_session target_window full_target
   if [[ -n "$prefix" ]]; then
     local id; id="$(resolve_id "$prefix")" || exit 1
     local meta; meta="$(task_meta_path "$id")"
     local window; window="$(meta_field "$meta" window)"
     [[ -n "$window" ]] || window="${SESSION}:task-${id}"
-    exec tmux attach "${flags[@]+${flags[@]}}" -t "$window"
+    target_session="${window%%:*}"
+    target_window="${window##*:}"
+    full_target="$window"
   else
-    exec tmux attach "${flags[@]+${flags[@]}}" -t "$SESSION"
+    target_session="$SESSION"
+    target_window=""
+    full_target="$SESSION"
   fi
+
+  # Inside a tmux client (the common case — picker bindings, manual
+  # invocation while attached): nesting `tmux attach` is forbidden, so
+  # use switch-client + select-window. This is what was failing silently
+  # and making the picker look like it just reloaded.
+  if [[ -n "${TMUX:-}" ]]; then
+    if ! tmux has-session -t "$target_session" 2>/dev/null; then
+      printf 'endy watch attach: tmux session %s%s%s is not running.\n' "${C_BOLD:-}" "$target_session" "${C_RST:-}" >&2
+      printf '  the task probably finished and its session was closed.\n' >&2
+      printf '  use: %sendy watch view %s%s\n' "${C_BOLD:-}" "${prefix:-${target_window#task-}}" "${C_RST:-}" >&2
+      sleep 2
+      exit 3
+    fi
+    if [[ -n "$target_window" ]] && \
+       ! tmux list-windows -t "$target_session" -F '#W' 2>/dev/null | grep -qxF "$target_window"; then
+      printf 'endy watch attach: window %s%s%s not found in session %s%s%s.\n' \
+        "${C_BOLD:-}" "$target_window" "${C_RST:-}" \
+        "${C_BOLD:-}" "$target_session" "${C_RST:-}" >&2
+      printf '  the task window may have been closed (gc/kill/timeout).\n' >&2
+      sleep 2
+      exit 3
+    fi
+    # switch-client retargets the current client to the target session.
+    # If there's no current client (very rare — only when run from a
+    # non-interactive shell without an attached tmux), fall back to
+    # printing the manual command so the user can run it themselves.
+    if ! tmux switch-client -t "$target_session" 2>/dev/null; then
+      printf 'endy watch attach: no current tmux client to retarget.\n' >&2
+      printf '  run manually: %stmux switch-client -t %s ; tmux select-window -t %s%s\n' \
+        "${C_BOLD:-}" "$target_session" "$full_target" "${C_RST:-}" >&2
+      sleep 2
+      exit 3
+    fi
+    if [[ -n "$target_window" ]]; then
+      tmux select-window -t "${target_session}:${target_window}" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # Outside tmux: regular attach, optionally read-only.
+  local flags=()
+  [[ "$strict" == "1" ]] && flags+=(-r)
+  exec tmux attach "${flags[@]+${flags[@]}}" -t "$full_target"
 }
 
 # ---------------------------------------------------------------------------
@@ -2614,7 +2683,9 @@ ${prompt}"
 # ---------------------------------------------------------------------------
 
 cmd_kill() {
-  require_session
+  # NOT calling require_session: the task may live in a different
+  # session than $SESSION. We resolve its real window from the meta
+  # below.
   local prefix="${1:-}"
   [[ -n "$prefix" ]] || { echo "usage: endy-watch kill <id-prefix>" >&2; exit 2; }
   local id; id="$(resolve_id "$prefix")" || exit 1
@@ -3158,6 +3229,477 @@ cmd_jump() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# wt-* family — read-only worktree queries (Phase 5.2).
+#
+# Three subcommands with the same shape: resolve <id-prefix>, look up
+# worktree_dir + worktree_origin_cwd from the meta, run a git command in
+# the worktree and stream stdout. Error loud + early when the task has no
+# worktree or its dir is gone.
+# ---------------------------------------------------------------------------
+
+# Helper: JSON-escape a single string (no jq dep). Handles \, ", and the
+# common control chars. Caller writes the surrounding quotes via "%s".
+_endy_json_str() {
+  local s="${1-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '"%s"' "$s"
+}
+
+# Helper: commits_ahead from a worktree, relative to its origin repo HEAD
+# right now (snapshot — drifts as origin advances, that's intentional: we
+# report "what would I be merging if I merged now"). 0 on any failure.
+_endy_wt_commits_ahead() {
+  local wt="$1" origin_cwd="$2"
+  [[ -d "$wt" && -d "$origin_cwd" ]] || { printf '0\n'; return 0; }
+  local origin_head
+  origin_head="$(cd "$origin_cwd" 2>/dev/null && git rev-parse HEAD 2>/dev/null)" || true
+  [[ -n "$origin_head" ]] || { printf '0\n'; return 0; }
+  local n
+  n="$(cd "$wt" 2>/dev/null && git rev-list --count "${origin_head}..HEAD" 2>/dev/null)" || n=""
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$n"
+}
+
+# Helper: porcelain counts. Prints "MODIFIED\tUNTRACKED". 0/0 on any failure.
+# `??` lines from `git status --porcelain` are untracked; everything else
+# (modified, added, deleted, renamed, copied, unmerged) counts as modified.
+_endy_wt_porcelain_counts() {
+  local wt="$1"
+  [[ -d "$wt" ]] || { printf '0\t0\n'; return 0; }
+  local mod=0 untr=0 line first
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    first="${line:0:2}"
+    if [[ "$first" == "??" ]]; then
+      untr=$((untr + 1))
+    else
+      mod=$((mod + 1))
+    fi
+  done < <(cd "$wt" 2>/dev/null && git status --porcelain 2>/dev/null)
+  printf '%d\t%d\n' "$mod" "$untr"
+}
+
+# Helper: origin branch (current HEAD branch of the main worktree). Empty on
+# detached HEAD or git failure.
+_endy_wt_origin_branch() {
+  local origin_cwd="$1"
+  [[ -d "$origin_cwd" ]] || { printf '\n'; return 0; }
+  local b
+  b="$(cd "$origin_cwd" 2>/dev/null && git symbolic-ref --short HEAD 2>/dev/null)" || b=""
+  printf '%s\n' "$b"
+}
+
+# Helper: resolve <id-prefix> to (id, meta_path, wt, origin_cwd). Prints
+# tab-separated fields. Returns 1 on any failure (with message on stderr).
+# Caller usage:
+#   IFS=$'\t' read -r id meta wt origin_cwd < <(_endy_resolve_wt_target "$prefix" "wt-diff") || return 1
+_endy_resolve_wt_target() {
+  local prefix="$1" cmd_label="$2"
+  local id; id="$(resolve_id "$prefix")" || return 1
+  local meta; meta="$(task_meta_path "$id")"
+  if [[ ! -f "$meta" ]]; then
+    echo "endy watch $cmd_label: meta file not found for task '$id'" >&2
+    return 1
+  fi
+  local wt; wt="$(meta_field "$meta" worktree_dir)"
+  local origin_cwd; origin_cwd="$(meta_field "$meta" worktree_origin_cwd)"
+  if [[ -z "$wt" ]]; then
+    echo "endy watch $cmd_label: task '$id' has no worktree (worktree_dir empty in $meta)" >&2
+    return 1
+  fi
+  if [[ ! -d "$wt" ]]; then
+    echo "endy watch $cmd_label: worktree dir gone: $wt" >&2
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$id" "$meta" "$wt" "$origin_cwd"
+}
+
+# ---------------------------------------------------------------------------
+# wt-diff — git diff worktree HEAD vs origin repo HEAD.
+# ---------------------------------------------------------------------------
+
+cmd_wt_diff() {
+  local id_prefix=""
+  local mode="full"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stat) mode="stat"; shift ;;
+      --files|--name-only) mode="files"; shift ;;
+      -h|--help)
+        cat <<'EOF'
+usage: endy watch wt-diff <id-prefix> [--stat | --files]
+
+Print the diff between the task's worktree HEAD and its origin repo HEAD.
+Output goes to stdout — pipe into less or save to a file.
+
+  --stat   only the diffstat (file paths + lines added/removed)
+  --files  only the list of changed file paths (--name-only)
+EOF
+        return 0 ;;
+      --) shift; break ;;
+      -*) echo "endy watch wt-diff: unknown flag '$1'" >&2; return 2 ;;
+      *) id_prefix="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id_prefix" ]] || { echo "usage: endy watch wt-diff <id-prefix> [--stat | --files]" >&2; return 2; }
+
+  local id meta wt origin_cwd
+  IFS=$'\t' read -r id meta wt origin_cwd < <(_endy_resolve_wt_target "$id_prefix" "wt-diff") || return 1
+  local origin_head=""
+  if [[ -n "$origin_cwd" && -d "$origin_cwd" ]]; then
+    origin_head="$(cd "$origin_cwd" && git rev-parse HEAD 2>/dev/null)" || origin_head=""
+  fi
+  if [[ -z "$origin_head" ]]; then
+    echo "endy watch wt-diff: cannot resolve origin HEAD for $origin_cwd" >&2
+    return 1
+  fi
+
+  case "$mode" in
+    full)  git -C "$wt" diff "${origin_head}..HEAD" ;;
+    stat)  git -C "$wt" diff --stat "${origin_head}..HEAD" ;;
+    files) git -C "$wt" diff --name-only "${origin_head}..HEAD" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# wt-log — git log of agent's commits on the worktree branch.
+# ---------------------------------------------------------------------------
+
+cmd_wt_log() {
+  local id_prefix=""
+  local since=""
+  local pretty="format:%h %ai %s"
+  local oneline=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since) since="$2"; shift 2 ;;
+      --pretty) pretty="$2"; oneline=0; shift 2 ;;
+      --oneline) oneline=1; shift ;;
+      -h|--help)
+        cat <<'EOF'
+usage: endy watch wt-log <id-prefix> [--since <when>] [--pretty <fmt>]
+
+Print commits the agent made on its worktree branch (commits in worktree
+HEAD that are not in the origin repo HEAD).
+
+  --since <when>   git --since filter (e.g. "1 hour ago", "2026-05-15")
+  --pretty <fmt>   git --pretty passthrough (default: "%h %ai %s")
+  --oneline        short format (same as default; explicit override)
+EOF
+        return 0 ;;
+      --) shift; break ;;
+      -*) echo "endy watch wt-log: unknown flag '$1'" >&2; return 2 ;;
+      *) id_prefix="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id_prefix" ]] || { echo "usage: endy watch wt-log <id-prefix> [--since <when>] [--pretty <fmt>]" >&2; return 2; }
+
+  local id meta wt origin_cwd
+  IFS=$'\t' read -r id meta wt origin_cwd < <(_endy_resolve_wt_target "$id_prefix" "wt-log") || return 1
+
+  local origin_head=""
+  if [[ -n "$origin_cwd" && -d "$origin_cwd" ]]; then
+    origin_head="$(cd "$origin_cwd" && git rev-parse HEAD 2>/dev/null)" || origin_head=""
+  fi
+
+  local args=(--pretty="$pretty")
+  [[ "$oneline" == "1" ]] && args=(--oneline)
+  [[ -n "$since" ]] && args+=(--since="$since")
+
+  if [[ -n "$origin_head" ]]; then
+    git -C "$wt" log "${args[@]}" "${origin_head}..HEAD"
+  else
+    # Origin lost — fall back to the full branch log so the user still sees something.
+    git -C "$wt" log "${args[@]}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# worktrees — list active worktrees with live git counters.
+# ---------------------------------------------------------------------------
+
+cmd_worktrees() {
+  local fmt="human"
+  local only_dirty=0
+  local only_stale=0
+  local stale_secs=3600
+  local repo_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) AGGREGATE=1; shift ;;
+      --repo) repo_filter="$2"; shift 2 ;;
+      --dirty) only_dirty=1; shift ;;
+      --stale) only_stale=1; shift ;;
+      --stale-secs) stale_secs="$2"; shift 2 ;;
+      --format) fmt="$2"; shift 2 ;;
+      -h|--help)
+        cat <<'EOF'
+usage: endy watch worktrees [--all] [--repo <path>] [--dirty] [--stale]
+                            [--stale-secs <N>] [--format human|json]
+
+List active git worktrees created by endy tasks, with live counters.
+
+  --all          aggregate across every per-dir endy session (cross-repo).
+  --repo <path>  filter to worktrees whose origin repo is <path>.
+  --dirty        keep only worktrees with porcelain != empty.
+  --stale        keep only worktrees idle for >= stale-secs (default 3600).
+  --stale-secs N override the staleness threshold (in seconds).
+  --format       output format: human (default, cards) or json.
+
+Each card / object exposes:
+  branch, dir, origin_cwd, origin_branch, owner_task_id, owner_session,
+  owner_agent, status, commits_ahead, porcelain_modified,
+  porcelain_untracked, chain_size, last_activity_epoch, age_seconds.
+EOF
+        return 0 ;;
+      --) shift; break ;;
+      -*) echo "endy watch worktrees: unknown flag '$1'" >&2; return 2 ;;
+      *) echo "endy watch worktrees: unexpected positional '$1'" >&2; return 2 ;;
+    esac
+  done
+  case "$fmt" in
+    human|json) ;;
+    *) echo "endy watch worktrees: --format must be 'human' or 'json'" >&2; return 2 ;;
+  esac
+
+  if [[ -n "$repo_filter" ]]; then
+    local resolved
+    resolved="$(cd "$repo_filter" 2>/dev/null && pwd)" || true
+    [[ -n "$resolved" ]] && repo_filter="$resolved"
+  fi
+
+  local now; now="$(date +%s)"
+
+  # Discovery: walk every meta file; group by worktree_dir. Owner is the
+  # task whose worktree_inherited is empty (it created the wt). Inheritors
+  # come via handoff and share the same dir + branch.
+  declare -A OWNER_OF AGENT_OF SESSION_OF ORIGIN_OF BRANCH_OF WT_TASKS
+  local m id wt agent inherited origin_cwd branch sess w
+  while IFS= read -r m; do
+    wt="$(meta_field "$m" worktree_dir)"
+    [[ -n "$wt" ]] || continue
+    id="$(basename "$m" .meta | sed 's/^task-//')"
+    inherited="$(meta_field "$m" worktree_inherited)"
+    agent="$(meta_field "$m" agent)"
+    origin_cwd="$(meta_field "$m" worktree_origin_cwd)"
+    branch="$(meta_field "$m" worktree_branch)"
+    w="$(meta_field "$m" window)"
+    sess="${w%%:*}"
+    [[ -z "$sess" || "$sess" == "$w" ]] && sess="$SESSION"
+
+    if [[ -n "$repo_filter" && "$origin_cwd" != "$repo_filter" ]]; then
+      continue
+    fi
+
+    WT_TASKS[$wt]="${WT_TASKS[$wt]-}$id "
+    if [[ -z "$inherited" ]]; then
+      OWNER_OF[$wt]="$id"
+      AGENT_OF[$wt]="$agent"
+      SESSION_OF[$wt]="$sess"
+      ORIGIN_OF[$wt]="$origin_cwd"
+      BRANCH_OF[$wt]="$branch"
+    fi
+  done < <(_iter_meta_files)
+
+  local -a WTS=()
+  local k
+  for k in "${!WT_TASKS[@]}"; do
+    WTS+=("$k")
+  done
+  if [[ ${#WTS[@]} -gt 0 ]]; then
+    mapfile -t WTS < <(printf '%s\n' "${WTS[@]}" | sort)
+  fi
+
+  local rendered=0 first=1
+  if [[ "$fmt" == "json" ]]; then
+    printf '{\n  "version": "1",\n  "as_of": '
+    _endy_json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf ',\n  "worktrees": ['
+  fi
+
+  local owner mtime age status owner_meta owner_log owner_kind
+  local commits_ahead pc mod untr origin_branch chain_size
+  local dirty_chip ahead_chip sess_color bullet logs line
+  for wt in "${WTS[@]}"; do
+    if [[ ! -d "$wt" ]]; then
+      continue
+    fi
+    owner="${OWNER_OF[$wt]-}"
+    agent="${AGENT_OF[$wt]-}"
+    sess="${SESSION_OF[$wt]-}"
+    origin_cwd="${ORIGIN_OF[$wt]-}"
+    branch="${BRANCH_OF[$wt]-}"
+
+    commits_ahead="$(_endy_wt_commits_ahead "$wt" "$origin_cwd")"
+    pc="$(_endy_wt_porcelain_counts "$wt")"
+    mod="${pc%%$'\t'*}"
+    untr="${pc##*$'\t'}"
+    origin_branch="$(_endy_wt_origin_branch "$origin_cwd")"
+    mtime="$(stat -c %Y "$wt" 2>/dev/null || echo 0)"
+    age=$((now - mtime))
+
+    status="?"
+    if [[ -n "$owner" ]]; then
+      owner_meta="$(task_meta_path "$owner")"
+      if [[ -f "$owner_meta" ]]; then
+        owner_log="$(task_log_path "$owner_meta" "$owner")"
+        owner_kind="$(meta_field "$owner_meta" kind)"; owner_kind="${owner_kind:-spawn}"
+        status="$(log_status "$owner_log" "$owner" "$owner_kind" "$sess" 2>/dev/null || echo "?")"
+      fi
+    fi
+    if [[ "$age" -gt "$stale_secs" ]]; then
+      case "$status" in
+        DONE|DONE-ERR|FAIL*|FAILED*|ABANDONED) status="STALE" ;;
+      esac
+    fi
+
+    if [[ "$only_dirty" == "1" && "$mod" == "0" && "$untr" == "0" ]]; then
+      continue
+    fi
+    if [[ "$only_stale" == "1" && "$age" -le "$stale_secs" ]]; then
+      continue
+    fi
+
+    chain_size="$(printf '%s' "${WT_TASKS[$wt]-}" | tr ' ' '\n' | grep -c '.' || echo 0)"
+
+    if [[ "$fmt" == "json" ]]; then
+      if [[ "$first" == "1" ]]; then first=0; else printf ','; fi
+      printf '\n    {\n'
+      printf '      "branch": ';        _endy_json_str "$branch";       printf ',\n'
+      printf '      "dir": ';           _endy_json_str "$wt";           printf ',\n'
+      printf '      "origin_cwd": ';    _endy_json_str "$origin_cwd";   printf ',\n'
+      printf '      "origin_branch": '; _endy_json_str "$origin_branch";printf ',\n'
+      printf '      "owner_task_id": '; _endy_json_str "$owner";        printf ',\n'
+      printf '      "owner_session": ';_endy_json_str "$sess";         printf ',\n'
+      printf '      "owner_agent": ';   _endy_json_str "$agent";        printf ',\n'
+      printf '      "status": ';        _endy_json_str "$status";       printf ',\n'
+      printf '      "commits_ahead": %s,\n' "$commits_ahead"
+      printf '      "porcelain_modified": %s,\n' "$mod"
+      printf '      "porcelain_untracked": %s,\n' "$untr"
+      printf '      "chain_size": %s,\n' "$chain_size"
+      printf '      "last_activity_epoch": %s,\n' "$mtime"
+      printf '      "age_seconds": %s\n' "$age"
+      printf '    }'
+    else
+      sess_color="$(_endy_session_color "$sess" 2>/dev/null || printf '')"
+      bullet="$(_endy_status_bullet "$status" 2>/dev/null || printf '*')"
+      printf '%s▎%s %s%s%s%s\n' "$sess_color" "$C_RST" "$C_BOLD" "$sess_color" "${branch:-?}" "$C_RST"
+      printf '   %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..60})" "$C_RST"
+
+      dirty_chip=""
+      if [[ "$mod" -gt 0 || "$untr" -gt 0 ]]; then
+        dirty_chip="  ${C_YLW}✗${C_RST} ${C_DIM}${mod}M ${untr}U${C_RST}"
+      fi
+      ahead_chip=""
+      [[ "$commits_ahead" -gt 0 ]] && ahead_chip="  ${C_GRN}↑${commits_ahead}${C_RST}"
+
+      printf '    %s  %s%-9s%s%s%s\n' "$bullet" "$C_BOLD" "$status" "$C_RST" "$ahead_chip" "$dirty_chip"
+      printf '    %spath%s   %s\n' "$C_DIM" "$C_RST" "$wt"
+      if [[ -n "$origin_cwd" ]]; then
+        printf '    %srepo%s   %s' "$C_DIM" "$C_RST" "$origin_cwd"
+        [[ -n "$origin_branch" ]] && printf ' %son branch %s%s' "$C_DIM" "$origin_branch" "$C_RST"
+        printf '\n'
+      fi
+      if [[ -n "$owner" ]]; then
+        printf '    %sowner%s  %s · %s · %s ago\n' "$C_DIM" "$C_RST" "$owner" "${agent:-?}" "$(human_runtime "$age")"
+      fi
+      if [[ "$chain_size" -gt 1 ]]; then
+        printf '    %schain%s  %s links share this worktree\n' "$C_DIM" "$C_RST" "$chain_size"
+      fi
+      if [[ "$commits_ahead" -gt 0 ]]; then
+        logs="$(cd "$wt" 2>/dev/null && git log --pretty='format:    %h %s' -3 2>/dev/null)"
+        if [[ -n "$logs" ]]; then
+          while IFS= read -r line; do
+            printf '%s%s%s\n' "$C_DIM" "$line" "$C_RST"
+          done <<< "$logs"
+        fi
+      fi
+      printf '\n'
+    fi
+    rendered=$((rendered + 1))
+  done
+
+  if [[ "$fmt" == "json" ]]; then
+    printf '\n  ]\n}\n'
+  else
+    if [[ "$rendered" == "0" ]]; then
+      printf '%s(no active worktrees matching filters)%s\n' "$C_DIM" "$C_RST"
+      if [[ "$AGGREGATE" == "0" ]]; then
+        printf '%shint: try --all to search every per-dir session%s\n' "$C_DIM" "$C_RST"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# wt-open — open a task's worktree directory in the user's editor.
+#
+# Non-TUI. Resolves <id-prefix> via the same resolve_id used everywhere else,
+# reads worktree_dir from the task meta, hands off to lib/editor.sh. Errors
+# loud + early if the task has no worktree or the dir is gone, so callers
+# (humans, scripts, fzf bindings later) get an actionable message.
+# ---------------------------------------------------------------------------
+
+cmd_wt_open() {
+  local id_prefix=""
+  local reuse=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reuse) reuse=1; shift ;;
+      --editor) ENDY_EDITOR="$2"; export ENDY_EDITOR; shift 2 ;;
+      -h|--help)
+        cat <<'EOF'
+usage: endy watch wt-open <id-prefix> [--editor <bin>] [--reuse]
+
+Open the git worktree directory of a task in your editor.
+
+Editor resolution (no hardcoded default):
+  1. $ENDY_EDITOR  (override; may include flags, e.g. "code --wait")
+  2. code          (VS Code stable on PATH)
+  3. cursor        (Cursor IDE on PATH)
+  4. $EDITOR       (your shell-configured fallback)
+  5. error — prints the path so you can open it manually
+
+Defaults to opening a new editor window (-n). Pass --reuse to open in the
+current one (-r). On WSL, the path is converted with wslpath -w so GUI
+editors on the Windows host receive a Windows path.
+EOF
+        return 0 ;;
+      --) shift; break ;;
+      -*) echo "endy watch wt-open: unknown flag '$1'" >&2; return 2 ;;
+      *) id_prefix="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id_prefix" ]] || { echo "usage: endy watch wt-open <id-prefix> [--editor <bin>] [--reuse]" >&2; return 2; }
+
+  local id; id="$(resolve_id "$id_prefix")" || return 1
+  local meta; meta="$(task_meta_path "$id")"
+  if [[ ! -f "$meta" ]]; then
+    echo "endy watch wt-open: meta file not found for task '$id'" >&2
+    return 1
+  fi
+  local wt; wt="$(meta_field "$meta" worktree_dir)"
+  if [[ -z "$wt" ]]; then
+    echo "endy watch wt-open: task '$id' has no worktree (worktree_dir empty in $meta)" >&2
+    echo "      spawn with --worktree (or set ENDY_DEFAULT_WORKTREE=1) to get isolation next time." >&2
+    return 1
+  fi
+  if [[ ! -d "$wt" ]]; then
+    echo "endy watch wt-open: worktree dir gone: $wt" >&2
+    echo "      (was the task purged? meta still references it but the dir is missing.)" >&2
+    return 1
+  fi
+
+  local args=()
+  [[ "$reuse" == "1" ]] && args+=(--reuse)
+  _endy_open_in_editor "$wt" "${args[@]}"
+}
+
 case "${1:-attach}" in
   attach|"")     shift || true; cmd_attach "$@" ;;
   list|ls)       shift; cmd_list "$@" ;;
@@ -3182,11 +3724,15 @@ case "${1:-attach}" in
   gc)            shift; cmd_gc "$@" ;;
   kill-all|close-all) shift; cmd_kill_all "$@" ;;
   purge|delete|purge-session) shift; cmd_purge "$@" ;;
+  wt-open)       shift; cmd_wt_open "$@" ;;
+  wt-diff)       shift; cmd_wt_diff "$@" ;;
+  wt-log)        shift; cmd_wt_log "$@" ;;
+  worktrees|wts) shift; cmd_worktrees "$@" ;;
   -h|--help|help)
-    sed -n '2,59p' "$0"
+    sed -n '2,81p' "$0"
     ;;
   *)
-    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | gc [--dry-run] | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything | purge <id> [--dry-run]]" >&2
+    echo "usage: $(basename "$0") [attach [<id>] | list | tree [--all] | dir <path> | log <id> | view <id> | follow <id> | chat <id> | browse [--all] [--cwd <dir>] [--orch <name>] | panel [--all] | followup <id> [-- <prompt>] | kill <id> | gc [--dry-run] | kill-all --agent <name>|--cwd <dir>|--orch <name>|--everything | purge <id> [--dry-run] | wt-open <id> [--editor <bin>] [--reuse] | wt-diff <id> [--stat|--files] | wt-log <id> [--since X] | worktrees [--all] [--repo X] [--dirty] [--stale] [--format human|json]]" >&2
     exit 2
     ;;
 esac
