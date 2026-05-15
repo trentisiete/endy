@@ -1,13 +1,96 @@
 ---
 name: endy-delegate
-description: "Use this skill when a task is best handed off to another coding agent in the endy stack — OpenCode (multi-model worker, fast refactors, test writing), CommandCode/cmd (taste-1 model for code-aesthetics review), or Claude Code (when re-enabled). Covers short blocking calls, long unsupervised tmux runs, AND watching/driving running agents live via tmux capture-pane and send-keys."
+description: "Use this skill when a task is best handed off to another coding agent in the endy stack — OpenCode (multi-model worker, fast refactors, test writing), CommandCode/cmd (Kimi K2.6 / DeepSeek), Hermes (Nous Research, tool-heavy), Gemini, or Claude. Covers three delivery modes: short blocking calls, long detached tmux spawns, and `endy handoff` — the cross-agent transfer used when one CLI runs out of tier mid-task."
 metadata:
-  short-description: Delegate to and live-drive endy subagents
+  short-description: Delegate to and hand off between endy subagents
 ---
 
 # endy-delegate
 
-Hand off a coding task to an endy subagent. Two delivery modes: **short** (blocking bash call, you wait for the output) and **long** (detached tmux window, you get a task ID back and check on it later).
+Hand off a coding task to an endy subagent. Three delivery modes:
+
+- **short** — blocking bash call, you wait for the output.
+- **long** — detached tmux window, you get a task ID back and check on
+  it later.
+- **handoff** — transfer an *in-flight* task from one agent to another
+  (e.g. opencode ran out of rate limit; cmd picks up with the same
+  prompt + opencode's full log).
+
+## Handoff: continue an in-flight task with a different agent
+
+`endy handoff <task-id>` is the cross-agent transfer. It exists for the
+case "this agent can't finish the task — get a different one to pick up
+without losing context".
+
+```bash
+endy handoff <task-id> --to <next-agent> --reason "<short>" [--stop-parent]
+```
+
+What it does, automatically:
+
+1. Reads the parent task's `.meta`, full `.log`, and `prompt.md`.
+2. Composes a new prompt with explicit handoff markers:
+   - `[endy handoff — you are taking over from a previous agent]`
+   - The original task prompt verbatim.
+   - The previous agent's FULL output (clear-to-EOL, ANSI-stripped). Cap
+     it with `--lines N` only when the target has a small context
+     window (e.g. gemini free).
+   - The reason you provided.
+3. Spawns the new agent in the **same tmux session** as the parent.
+   Inherits cwd and orchestrator label.
+4. Records the chain: `handoff_from`, `handoff_chain` (multi-hop
+   accumulates), `handoff_reason` in the new task's meta.
+5. With `--stop-parent`: closes the rate-limited window in the same
+   shot.
+
+If `ENDY_HANDOFF_RESOLVER=multiplexor-next-provider` is set (it is, by
+default after `endy install`), drop `--to` entirely — multiplexor picks
+the next eligible agent automatically:
+
+```bash
+endy handoff <task-id> --reason "rate limited"
+# → multiplexor marks the previous agent exhausted, returns next-best
+#   eligible (e.g. opencode → cmd), endy spawns it with the composed
+#   prompt above.
+```
+
+### When to call handoff (vs. spawn / live)
+
+| Situation | Use |
+|---|---|
+| Fresh task, no in-flight work to inherit | `endy spawn <agent>` |
+| Fresh task you want to drive interactively | `endy live open` (see `endy-live` skill) |
+| In-flight task hit a rate limit / quota / auth error | `endy handoff <task-id>` |
+| Same agent, just continue the conversation | `endy watch followup <id>` (native resume) |
+| Different agent, take over what was being done | `endy handoff <id> --to <agent>` |
+
+### Same-agent followup vs. cross-agent handoff
+
+`endy watch followup` is for **same agent** — it uses the agent's native
+session resume (opencode SQLite, hermes session_id, cmd context
+injection because cmd lacks headless resume). The conversation thread
+continues.
+
+`endy handoff` is for **different agent** — there is no native resume
+across agents, so endy composes a fresh prompt with the parent's full
+context. The new agent reads it, picks up the work, but the
+conversation thread is new.
+
+If you're an agent that received a handoff and want to know "what state
+am I in", the answer is in your prompt: the `## endy environment` block
+at the top (handoff chain, peers, tier headroom) plus the `--- original
+task prompt ---` and `--- full output of previous agent's output ---`
+blocks below. You don't need to call anything extra — the context is
+already in your first turn. Use `endy state` (see the endy-state skill)
+on later turns to refresh tier headroom.
+
+### Multi-hop chains
+
+`endy handoff` composes: each call adds the previous task to
+`handoff_chain`, so a 3-step `bash → opencode → cmd` chain shows in the
+final task's meta as `handoff_chain=<bashid>,<opencodeid>` and the
+ancestor lineage is visible in `endy watch tree`, `endy watch list`,
+and the web dashboard's chain badge.
 
 ## When to use which subagent
 
@@ -38,7 +121,12 @@ The user's standing model preferences (full inventory in `.logs/diag-models.md`)
 Notes:
 - **cmd has no `--model` CLI flag.** Switching is slash-command-only and persists in `~/.commandcode/config.json`. Spawned cmd tasks inherit whatever the user last selected.
 - For long-context cmd work, set `/model` to DeepSeek V4 Pro **before** dispatching the spawn — the spawn itself can't change it.
-- When cmd hits its turn budget producing empty output (a known failure mode of Kimi K2.6 on multi-fetch research, see `feedback_cmd_kimi_limits.md` in user memory), switch to opencode rather than retrying cmd. `big-pickle` finishes the same work in fewer turns.
+- When cmd hits its turn budget producing empty output (a known failure
+  mode of Kimi K2.6 on multi-fetch research), switch to opencode rather
+  than retrying cmd. `big-pickle` finishes the same work in fewer turns.
+  This is also a great moment to use `endy handoff <cmd-task-id> --to
+  opencode --reason "cmd turn budget exhausted"` — the new opencode task
+  inherits the prompt and cmd's full output, no re-typing.
 - Claude models (claude-opus-4-7 etc.) require the `anthropic` provider auth path in cmd, NOT the default `command-code` provider. Don't try to select them from the standard `/model` list.
 
 ## Short tasks (≤ ~5 min, you'll wait)
@@ -83,45 +171,52 @@ Decision in one line:
 
 ## Long tasks (≥ ~5 min, run unsupervised, full permissions OK)
 
-Use `scripts/spawn-long-task.sh`. It opens a fresh tmux window in the `endy` session, runs the command piped through `tee` to a log, and returns a task ID immediately.
+Use `endy spawn <agent>`. It opens a fresh tmux window in the
+per-directory endy session (`endy-<basename>` on the cwd, or the
+global `endy` session in overview mode), runs the agent piped through
+`tee` to a log, and returns a task ID immediately.
 
-`--persona` is **optional** — same with-persona-vs-ad-hoc rule as short tasks. Skip it when your prompt is fully self-specified.
+`--persona` is **optional** — same with-persona-vs-ad-hoc rule as short
+tasks. Skip it when your prompt is fully self-specified.
 
 ```bash
 # With persona:
-~/Downloads/endy/scripts/spawn-long-task.sh \
-  --agent opencode --persona refactor \
-  --cwd /path/to/project \
+endy spawn opencode --persona refactor --cwd /path/to/project \
   --prompt-file /tmp/task-prompt.md
 
 # Ad-hoc (no persona — your prompt is the spec):
-~/Downloads/endy/scripts/spawn-long-task.sh \
-  --agent opencode \
-  --cwd /path/to/project \
+endy spawn opencode --cwd /path/to/project \
   --prompt-file /tmp/task-prompt.md
+
+# Or with the prompt inline:
+endy spawn opencode -- "refactor src/auth/ to use IdentityProvider, then run npm test"
 ```
 
 It echoes:
 
 ```
 TASK_ID=20260505-143012-a1b2
-TMUX_WINDOW=endy:task-20260505-143012-a1b2
-LOG=$HOME/Downloads/endy/.logs/task-20260505-143012-a1b2.log
+TMUX_WINDOW=endy-myproject:task-20260505-143012-a1b2
+LOG=/.../endy/.logs/per-dir/endy-myproject/task-20260505-143012-a1b2.log
 ```
+
+The TMUX_WINDOW reflects the per-directory session, so multiple
+projects don't share a single tmux session — switch with `tmux attach
+-t endy-myproject` (per-dir) or `tmux attach -t endy` (overview).
 
 Tell the user the TASK_ID and LOG path, then move on. Do not block waiting.
 
 ### Checking on a long task
 
 ```bash
-~/Downloads/endy/scripts/check-long-task.sh <TASK_ID>
+endy watch view <TASK_ID>       # one-shot meta + prompt + last 200 lines
+endy watch log <TASK_ID>        # follow log with less +F
+endy watch follow <TASK_ID>     # new tmux window with live tail
+endy watch list                 # status table for everything in scope
 ```
 
-Output is one of:
-
-- `RUNNING` + last 50 lines of the log
-- `DONE` + last 100 lines + exit code
-- `FAILED` + last 100 lines + exit code
+Status is one of: `RUN`, `CHAT`, `PENDING`, `DONE`, `DONE-ERR`,
+`FAIL(<n>)`, `ABANDONED` (see `docs/operations.md` for the heuristics).
 
 ### Bringing the result back into the conversation
 
@@ -145,100 +240,56 @@ Long tasks default to the same sandbox the orchestrator is running in. If the us
 
 ## Watching and interacting with running agents
 
-After spawning a long task or chat, you are not blind. Three primitives let you observe and drive a running agent without restarting it.
+After spawning a long task or chat, you are not blind. The primitives
+to observe and drive a running agent without restarting it are
+documented in detail in the **endy-live skill**. The summary:
 
-### 1. Read the log file (post-mortem or live tail)
+- **Log file** (`.logs/per-dir/<session>/task-<id>.log`): plain text,
+  persistent, survives the agent exiting. Read with the file tools or
+  tail with `tail -F`. Use for post-mortem or non-disruptive snapshots.
 
-Every spawn writes `.logs/task-<id>.log` (and chats write `.logs/chat-<id>.log` via `tmux pipe-pane`). Plain text. Read with the file tools or tail with `tail -F`. Cheap, persistent, survives the agent exiting.
+- **`tmux capture-pane`** (`tmux capture-pane -t <session>:<window>
+  -p`): dumps the live TUI as text. Use when the log alone doesn't show
+  TUI state — slash-command menus, picker overlays, status bars, content
+  not yet committed to scrollback. Replace `<session>` with the
+  per-directory session name (e.g. `endy-myproject`), not a bare
+  `endy:` — endy is no longer a single shared session.
 
-Use when: the task has finished, or you want a non-disruptive snapshot.
+- **`tmux send-keys`** (`tmux send-keys -t <session>:<window> "<text>"
+  Enter`): drive an agent like a keyboard. Combine with `capture-pane`
+  for slash-command pickers (`/model`, `/agents`, `/skills`). Use
+  `Down` / `Up` / `Enter` one key per call for picker navigation;
+  type-to-search via `send-keys` is debounced away in cmd/hermes Ink
+  pickers.
 
-### 2. `tmux capture-pane` — read the live screen
-
-`tmux capture-pane -t endy:<window> -p` dumps the current contents of that pane's terminal cell grid as text on stdout. With `-S -200` you get the last 200 scrollback lines; with `-e` you also get ANSI escape codes (colour, bold).
-
-This is **a tmux feature, not a screenshot.** tmux already maintains the cell grid in memory (it's how it draws to your terminal); `capture-pane` just exports it. No image, no OCR. Works on any TUI — interactive cmd, opencode chat, vim, htop.
-
-```bash
-# After cmd is mid-render, get a textual screenshot of its TUI:
-tmux capture-pane -t endy:chat-20260506-205402-6f30 -p | tail -50
-```
-
-What you see: the banner, the input prompt, panels, slash-command menus, model name, anything visible to the user. Pre-render artifacts (cursor moves, repaints) may interleave — wait a beat or capture twice if the screen is animating.
-
-Use when: the agent is interactive (cmd, opencode chat, hermes chat) and the log file alone doesn't show TUI state — slash-command output, picker overlays, status bars, in-flight content not yet committed to scrollback.
-
-### 3. `tmux send-keys` — drive an agent like a keyboard
-
-`tmux send-keys -t endy:<window> "<text>" Enter` literally sends keystrokes to the pane. The agent receives them as if you typed. Combine with `capture-pane` to drive a TUI without being there.
-
-```bash
-# Ask an open cmd chat to dump its context budget
-WIN=endy:chat-20260506-205402-6f30
-tmux send-keys -t "$WIN" "/context" Enter
-sleep 2  # let the slash menu render
-tmux capture-pane -t "$WIN" -p | tail -30
-```
-
-Notes:
-- For multi-character input use `"text"` then `Enter` as separate args; do NOT embed `\n` in the string.
-- Slash-command menus in cmd/opencode sometimes need an extra `Enter` once the picker filtered to one match.
-- `send-keys` is racy — the agent may still be repainting. Capture once, sleep ~500ms–2s, capture again to confirm the new state stuck.
-- You CAN type into a busy pane; the agent's input buffer queues your keys. Use `C-c` cautiously — only if you know the pane accepts it.
+For end-to-end recipes (model switching, picker navigation,
+boot-detection, lifecycle rules), use the **endy-live skill** — it has
+the worked examples and gotchas. This skill (`endy-delegate`) covers
+the delegation side; `endy-live` covers the interactive-driving side.
 
 ### When to use which primitive
 
 | Goal | Primitive |
 |---|---|
-| "Did this task succeed? what did it say?" | log file (`.logs/task-<id>.log`) |
-| "What's currently on screen in this chat?" | `tmux capture-pane -p` |
-| "Has it printed `Reached maximum turns`?" | `grep -E "..." .logs/task-<id>.log` (or `Monitor`) |
-| "Submit a follow-up to a spawn-task" | `endy watch followup <id> -- "<prompt>"` (preferred — proper resume + parent_task wiring) |
-| "Submit a follow-up to a live interactive chat" | `tmux send-keys` into the chat window |
-| "Inspect a slash-command output" | `send-keys` then `capture-pane` |
+| "Did this task succeed? what did it say?" | log file (`endy watch view <id>`) |
+| "What's currently on screen in this chat?" | `endy-live` skill: `capture` |
+| "Has it printed `Reached maximum turns`?" | `grep "Reached maximum" .logs/.../task-<id>.log` |
+| "Submit a follow-up with the SAME agent" | `endy watch followup <id> -- "<prompt>"` |
+| "Transfer to a DIFFERENT agent" | `endy handoff <id> --to <agent>` (or no `--to` if resolver wired) |
+| "Submit a free-text prompt to a live interactive chat" | `endy-live` skill: `send` / `send-file` |
+| "Drive a slash-command picker" | `endy-live` skill: `send` + `capture` |
 
-Prefer `endy watch followup` over raw `send-keys` whenever a structured resume exists — it threads the agent's native session resume (cmd `-r "$title"`, opencode `--session`, hermes `--resume`) and records `parent_task` in meta. `send-keys` is for ad-hoc interactive driving when there's no spawn flow that fits.
+Three layered primitives, ordered by structure:
 
-### Driving TUI pickers (slash commands, model switching)
-
-cmd, opencode, and hermes all expose interactive pickers behind slash commands (`/model`, `/agents`, `/skills`, `/context`, `/resume`…). These can be driven end-to-end from outside the terminal using `send-keys` + `capture-pane`. The model switch is the canonical example.
-
-**Worked example: switch cmd to a different model.**
-
-```bash
-WIN=endy:chat-<id>
-
-# 1. Open the picker. Slash commands in cmd often need TWO Enters: the first
-#    commits the typed `/model` into the slash-command menu (which filters
-#    itself to that one entry), the second selects it and opens the actual
-#    model picker. If the picker doesn't render after one Enter, send another.
-tmux send-keys -t "$WIN" "/model" Enter
-sleep 3
-tmux send-keys -t "$WIN" Enter
-sleep 3
-tmux capture-pane -t "$WIN" -p -S -200 | tail -40   # confirm picker open
-
-# 2. Navigate. Arrow keys are the reliable path.
-#    Text-search via send-keys does NOT work in cmd's picker — sending
-#    "deepseek pro" as a single string is ignored. The picker only
-#    responds to single-keystroke events delivered in real time. So
-#    don't try to filter; count rows and arrow-down to the target.
-for _ in 1 2 3 4 5 6; do tmux send-keys -t "$WIN" Down; sleep 0.2; done
-tmux capture-pane -t "$WIN" -p | tail -25   # verify ❯ on the right row
-
-# 3. Confirm and verify the persistence layer.
-tmux send-keys -t "$WIN" Enter
-sleep 2
-jq -r '.model' ~/.commandcode/config.json     # cmd writes the new model here
-```
-
-After confirmation, the picker closes (the pane goes mostly empty, a normal post-selection state). The new model is written to `~/.commandcode/config.json` synchronously — that file is the source of truth and is the right thing to assert against, not the visible TUI.
-
-**Why arrow keys instead of text filter.** Pickers built on Ink/Bubble Tea (cmd, hermes) read keystrokes through an Ink/raw-mode TTY listener. `tmux send-keys "deepseek"` delivers the bytes too quickly, often during a render, and the input mode debounces them away. `Down` is one key per call — every press is processed cleanly. For automation, prefer `Down`/`Up`/`Enter` over typed search strings even when the picker advertises type-to-search.
-
-**Snapshot semantics for endy's MODEL column.** `endy watch list`'s MODEL column reads `model=` from each task's `.meta` file. Meta is written at spawn-time and never rewritten. So switching the global model affects only NEW spawns; existing rows keep showing whatever model was active when they were spawned. That's the intended snapshot behavior — drift is bounded.
-
-**Other slash-command pickers follow the same pattern.** `/agents`, `/skills`, `/resume` open similar TUIs. The same recipe works: open with slash + Enter (×2 if needed), navigate with arrows, confirm with Enter, verify against the persistence layer (config.json, the projects/ dir, etc.). For `/resume`, expect the picker to call `cmd -r` under the hood and replace the chat with the resumed session.
+- `endy watch followup` — same agent, native session resume. cmd `-r
+  "$title"`, opencode `--session`, hermes `--resume`. Records
+  `parent_task` in the new meta. Preferred over raw send-keys for
+  same-agent continuation.
+- `endy handoff` — different agent. Composes a fresh prompt with the
+  parent's full context. Records `handoff_from` / `handoff_chain` /
+  `handoff_reason`.
+- `endy-live` primitives — raw send-keys/capture-pane for ad-hoc TUI
+  driving when neither of the above fits.
 
 ### Gotcha: chat-kind vs spawn-kind in the watch picker
 

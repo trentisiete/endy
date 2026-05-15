@@ -1,7 +1,7 @@
 # endy
 
 > A tmux control plane that hands a coding task from one CLI agent to another
-> when the first one runs out of free tier.
+> when one runs out of tier.
 
 <!-- DEMO_GIF -->
 <p align="center">
@@ -51,7 +51,7 @@ becomes optional and routing happens automatically when one tier runs dry.
 | Orchestrator | `codex` | paid | Long context, good at planning. You pay only for the conductor. |
 | Worker | `opencode` | free (multiple backends) | Default for refactors, tests, fast edits |
 | Worker | `cmd` (CommandCode / Kimi K2.6) | ~€1 buys a lot of work | Strong taste reviewer; cheapest paid option |
-| Worker | `hermes` (Nous Research) | free for students via Copilot backend | Tool-heavy agentic work |
+| Worker | `hermes` (Nous Research) | depends on backend (configurable per provider, incl. Copilot) | Tool-heavy agentic work |
 | Worker | `gemini` (Google Gemini CLI) | free daily quota | Wide reach |
 | Fallback | local model (Ollama, via [multiplexor][multiplexor]) | local | When everything else is exhausted |
 | Smoke testing | `bash` (offline stub) | free | Spawns a no-op window so you can rehearse handoff chains without burning real-agent credits |
@@ -62,11 +62,13 @@ and authenticated.
 ## Quickstart
 
 Prereqs (macOS or Linux): `tmux`, `python3`, and at least one of
-`codex` / `opencode` / `cmd` / `hermes` on `PATH`.
+`codex` / `opencode` / `cmd` / `hermes` / `claude` / `gemini` on `PATH`.
 
 ```bash
 npm install -g @noetiklab/endy
-endy install                     # idempotent: symlinks, completion, PATH
+endy install                     # idempotent: symlinks, completion, PATH,
+                                 # AND bootstraps multiplexor from PyPI
+                                 # (the routing policy — see below)
 exec "$SHELL" -l
 endy doctor
 ```
@@ -123,24 +125,32 @@ not feel magical:
 
 ## Status
 
-Honest table — what is shippable today, what is on the roadmap:
+Honest table — what is shippable today, what is on the roadmap. Phase
+labels match [docs/roadmap.md](docs/roadmap.md).
 
-| | Status |
-|---|---|
-| `endy spawn` / `ask` / `chat` / `watch` (the basic stack) | works |
-| `endy handoff <id> --to <agent>` | works |
-| Web dashboard + Tailscale mobile | works |
-| Per-directory tmux sessions, global `endy overview` | works |
-| `endy watch tree` rendering handoff chains as a tree | not yet — small follow-up |
-| Web dashboard surfacing the handoff chain on a card | not yet — small follow-up |
-| `ENDY_HANDOFF_RESOLVER` integration with multiplexor | hook is ready; multiplexor side WIP |
-| Auto-detection of "free tier exhausted" (no `--to` needed) | Phase 2 |
-| Git worktree per spawned task (no two agents touching the same file) | Phase 3 |
+| Phase | Feature | Status |
+|---|---|---|
+| 0 | README + docs repositioning + LICENSE + PyPI metadata | shipped |
+| 1 | `endy spawn` / `ask` / `chat` / `watch` basic stack | shipped |
+| 1 | `endy handoff <id> --to <agent>` (manual handoff) | shipped |
+| 1 | Web dashboard + Tailscale mobile | shipped |
+| 1 | Per-directory tmux sessions + global `endy overview` | shipped |
+| 1 | `endy watch tree` / `list` render the `↪ handoff from X` chain | shipped |
+| 1 | Web dashboard cards show `↪ from <short>` + full chain panel | shipped |
+| 2 | `endy install` bootstraps multiplexor from PyPI automatically | shipped |
+| 2 | `ENDY_HANDOFF_RESOLVER` auto-routing (no `--to` needed) | shipped |
+| 2 | `multiplexor next-provider` + `multiplexor status --json` | shipped |
+| 3 | `endy state` snapshot + auto-prepended environment block | shipped |
+| 3 | `codex/skills/endy-state` Codex skill | shipped |
+| 4 | Auto-detection of exhaustion from CLI stderr signals | planned |
+| 5 | Git worktree per spawned task (parallel isolation) | planned |
+| 6 | npm 0.6.0+ stable surface, real demo GIF, public launch | planned |
 
-Today, you tell endy when to hand off. Phase 2 will let endy detect
-exhaustion from CLI stderr signals (Gemini's `RESOURCE_EXHAUSTED`,
-opencode's `ProviderModelNotFoundError`, cmd's auth/quota errors, hermes's
-session-end signals) and call the handoff itself.
+Today you decide *when* to call `endy handoff`; multiplexor decides
+*who* picks up next. Phase 4 will detect exhaustion from CLI stderr
+signals (Gemini's `RESOURCE_EXHAUSTED`, opencode's
+`ProviderModelNotFoundError`, cmd's auth/quota errors, hermes's
+session-end markers) and dispatch the handoff itself.
 
 ## Multiplexor
 
@@ -149,8 +159,17 @@ have installed, scores them by `priority + tier_bonus`, and picks the
 best one. When you wire it as `ENDY_HANDOFF_RESOLVER`, every `endy handoff`
 without an explicit `--to` calls multiplexor for the next eligible agent.
 
+You do not install it separately: `endy install` already pulls
+[`endy-multiplexor`][mxp-pypi] from PyPI (via `pipx` / `uv tool` / `pip
+--user`, in that order of preference) and exports
+`ENDY_HANDOFF_RESOLVER=multiplexor-next-provider` into your shell
+startup. Pass `--no-multiplexor` to `endy install` if you want to skip
+it.
+
 The two repos are independent — you can use either alone — but they are
 designed to compose. endy is the runtime; multiplexor is the policy.
+
+[mxp-pypi]: https://pypi.org/project/endy-multiplexor/
 
 ## A note on terms of service
 
@@ -166,10 +185,11 @@ yourself.
 - [docs/operations.md](docs/operations.md) — full command reference, manager workflows, the `endy watch` family, the `.logs/` contract, web dashboard internals
 - [docs/cli-gotchas.md](docs/cli-gotchas.md) — per-CLI quirks (`opencode --dir`, `cmd --max-turns`, `hermes -Q`, tmux specifics)
 - [docs/demo.md](docs/demo.md) — script for recording the handoff GIF, beat-by-beat
+- [docs/roadmap.md](docs/roadmap.md) — phases 0-6 with closing commits and what's coming next
 
 `endy help` prints top-level usage. `endy help <agent>` (where `<agent>` is
-one of `opencode`, `cmd`, `hermes`, `claude`, `tmux`) prints the relevant
-section of the gotchas doc.
+one of `opencode`, `cmd`, `hermes`, `claude`, `gemini`, `bash`, `tmux`)
+prints the relevant section of the gotchas doc.
 
 ## Related
 

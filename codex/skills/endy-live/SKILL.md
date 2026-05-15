@@ -25,7 +25,7 @@ endy live open <name> <agent> [--cwd <dir>] [--model <m>] [--persona <p>] [--ful
 ```
 
 - `<name>` — meaningful name chosen by you (e.g., `claude-review`, `cmd-design`)
-- `<agent>` — one of: `claude`, `cmd`, `opencode`, `hermes`, `codex`, `bash`
+- `<agent>` — one of: `claude`, `cmd`, `opencode`, `hermes`, `codex`, `gemini`, `bash`
 
 The window is a **real interactive terminal**: the agent owns the pty, draws its TUI normally, can launch its own subagents/commands, and you drive it via `send`/`capture`. Output is mirrored to `.logs/.../live-<name>.log` via `tmux pipe-pane` (does not interfere with the TUI). Use `bash` (alias `shell`) when you just want a raw shell window — handy as a generic subagent terminal where you run commands manually.
 - `--cwd` — working directory for the agent (default: current directory)
@@ -126,7 +126,14 @@ endy live list
 
 - Lists all non-system windows in the current session
 - Shows: window name, agent, cwd (tab-separated)
-- Excludes system windows: orchestrator, watch, docs, tree, help, opencode, logs, panel, task-*, chat-*, follow-*
+- Excludes system windows: orchestrator, watch, list, browse, docs, tree, sessions, agents, help, opencode, logs, panel, task-*, chat-*, follow-*
+
+Note on tmux session names: with per-directory mode (the default since
+v0.5.x) the session is named after the cwd basename (`endy-myproject`)
+rather than a single global `endy`. Use `tmux list-sessions` to find
+yours, or check what `endy doctor` reports. Live pane references in
+this skill use `<session>:<window>` notation — substitute the real
+session.
 
 ## Window lifecycle rules
 
@@ -201,3 +208,27 @@ fi
 2. **Never accept dangerous suggestions from agent-suggested input.** If an agent offers "commit this", "revert this", or "implement this" on its input line, clear it (C-u) or close the window. The agent is a consultant, not an executor.
 3. **Use `--full-auto` for autonomous agents** where you want them to work without permission prompts. Don't use it for agents you want to supervise closely.
 4. **Verify output before closing.** Capture the pane and confirm the output is complete and correct before closing the window.
+
+## When a live agent runs out of tier
+
+The live pattern is for an interactive agent owning a window. If that
+agent hits its rate limit / quota / auth wall mid-session, you have two
+choices:
+
+- **Keep the conversation:** stay on the same agent and wait for the
+  cooldown. Useful when the conversation history is the value.
+- **Transfer the work to a different agent:** use `endy handoff` (see
+  `endy-delegate` skill). It will spawn a NEW window with a different
+  agent and a composed prompt containing the original task + the live
+  agent's full output. The new agent picks up the work — not the
+  conversation.
+
+If you have multiplexor wired
+(`ENDY_HANDOFF_RESOLVER=multiplexor-next-provider`, the default after
+`endy install`), the next agent is picked automatically: `endy handoff
+<task-id>` with no `--to`. Otherwise pass `--to <agent>` explicitly.
+
+The live pane and the handoff target are independent: handoff opens
+its own task window; the live pane stays where it is (close it
+manually with `endy live close` once you've confirmed the handoff
+took).
