@@ -271,6 +271,126 @@ _endy_print_agent_stats_line() {
   esac
 }
 
+# Classify the agent running inside a tmux pane.
+#
+# Window name wins (explicit user/orchestrator naming). Otherwise we walk the
+# pane's process tree up to 4 levels deep and look for a known CLI binary —
+# this is what catches `node /usr/bin/codex`, `node /usr/bin/cmd`, etc., which
+# tmux reports as `pane_current_command=node` and which the old name-only
+# classifier left mislabelled as the literal string "node".
+#
+# Returns one of: codex|opencode|cmd|claude|hermes|gemini|shell|<wcmd>
+# - "shell" is reserved for plain bash/zsh/sh/fish panes whose process tree
+#   contains no recognized agent — callers can filter those out so the agents
+#   view doesn't list empty terminals as agents.
+_endy_detect_pane_agent() {
+  local target="$1" wname="$2" wcmd="$3"
+  case "$wname" in
+    *claude*)             printf 'claude';   return ;;
+    *codex*)              printf 'codex';    return ;;
+    *opencode*|oc-*)      printf 'opencode'; return ;;
+    *cmd-*|*commandcode*) printf 'cmd';      return ;;
+    *hermes*)             printf 'hermes';   return ;;
+    *gemini*)             printf 'gemini';   return ;;
+  esac
+
+  local pane_pid
+  pane_pid="$(tmux display -p -t "$target" '#{pane_pid}' 2>/dev/null)"
+  if [[ -n "$pane_pid" && "$pane_pid" =~ ^[0-9]+$ ]]; then
+    local frontier="$pane_pid" all="$pane_pid" depth=0 next cur kids p args first second
+    while [[ -n "$frontier" && "$depth" -lt 4 ]]; do
+      next=""
+      for cur in $frontier; do
+        kids="$(pgrep -P "$cur" 2>/dev/null)"
+        [[ -n "$kids" ]] && { all+=" $kids"; next+=" $kids"; }
+      done
+      frontier="$next"
+      depth=$((depth + 1))
+    done
+    for p in $all; do
+      args="$(ps -p "$p" -o args= 2>/dev/null)"
+      [[ -z "$args" ]] && continue
+      # shellcheck disable=SC2086
+      set -- $args
+      first="${1##*/}"
+      second=""
+      [[ $# -ge 2 ]] && second="${2##*/}"
+      case "$first" in
+        node|node[0-9]*|python|python[0-9]*|deno|bun|java|ruby|perl)
+          [[ -n "$second" ]] && first="$second"
+          ;;
+      esac
+      first="${first%.js}"
+      first="${first%.mjs}"
+      case "$first" in
+        codex|codex-*)   printf 'codex';    return ;;
+        opencode|oc)     printf 'opencode'; return ;;
+        cmd|commandcode) printf 'cmd';      return ;;
+        claude)          printf 'claude';   return ;;
+        hermes)          printf 'hermes';   return ;;
+        gemini)          printf 'gemini';   return ;;
+      esac
+    done
+  fi
+
+  case "$wcmd" in
+    bash|zsh|sh|fish|-bash|-zsh|dash|ksh) printf 'shell'; return ;;
+  esac
+  printf '%s' "$wcmd"
+}
+
+# Stable color rotation for session blocks. Same name → same color across
+# refreshes, so a session keeps its visual identity. Falls back to no color
+# when the terminal can't render ANSI (NO_COLOR=1 or non-tty).
+_endy_session_color() {
+  local name="$1"
+  [[ -t 1 && -z "${NO_COLOR:-}" ]] || { printf ''; return; }
+  local sum=0 i ch
+  for ((i=0; i<${#name}; i++)); do
+    ch="${name:i:1}"
+    sum=$((sum + $(printf '%d' "'$ch")))
+  done
+  case $((sum % 5)) in
+    0) printf '\033[35m' ;; # magenta
+    1) printf '\033[36m' ;; # cyan
+    2) printf '\033[34m' ;; # blue
+    3) printf '\033[33m' ;; # yellow
+    4) printf '\033[95m' ;; # bright magenta
+  esac
+}
+
+# Single-glyph status indicator with color. Mirrors opencode's status-dot
+# convention so users coming from there don't need to relearn it.
+#   ● green  = running / working / live
+#   ○ dim    = idle / pending
+#   ▲ yellow = warn (DONE-ERR / handoff origin)
+#   ✕ red    = dead (FAIL / ABANDONED)
+_endy_status_bullet() {
+  local status="$1"
+  local rst=""; [[ -t 1 && -z "${NO_COLOR:-}" ]] && rst=$'\033[0m'
+  local on=""
+  case "$status" in
+    RUN|running|live|working|ready)
+      [[ -n "$rst" ]] && on=$'\033[32m'
+      printf '%s●%s' "$on" "$rst" ;;
+    PENDING|idle|—)
+      [[ -n "$rst" ]] && on=$'\033[2m'
+      printf '%s○%s' "$on" "$rst" ;;
+    DONE)
+      [[ -n "$rst" ]] && on=$'\033[2m\033[32m'
+      printf '%s●%s' "$on" "$rst" ;;
+    DONE-ERR|warn|WARN)
+      [[ -n "$rst" ]] && on=$'\033[33m'
+      printf '%s▲%s' "$on" "$rst" ;;
+    FAIL*|ABANDONED|dead)
+      [[ -n "$rst" ]] && on=$'\033[31m'
+      printf '%s✕%s' "$on" "$rst" ;;
+    *)
+      [[ -n "$rst" ]] && on=$'\033[2m'
+      printf '%s·%s' "$on" "$rst" ;;
+  esac
+}
+
 # Read a key=value field from a meta file.
 meta_field() {
   local meta="$1" field="$2"
@@ -916,15 +1036,10 @@ cmd_agents() {
       cwd_matches_filter "$wpath" "$cwd_filter" || continue
       [[ -z "$orch_filter" || "$tsess" == "$orch_filter" ]] || continue
 
-      local twagent="$wcmd"
-      case "$wname" in
-        *claude*)                twagent="claude" ;;
-        *codex*)                 twagent="codex" ;;
-        *opencode*|oc-*)         twagent="opencode" ;;
-        *cmd-*|*commandcode*)    twagent="cmd" ;;
-        *hermes*)                twagent="hermes" ;;
-        *gemini*)                twagent="gemini" ;;
-      esac
+      local twagent
+      twagent="$(_endy_detect_pane_agent "${tsess}:${wname}" "$wname" "$wcmd")"
+      # Plain shells with no recognized agent process running aren't agents.
+      [[ "$twagent" == "shell" ]] && continue
 
       local twruntime="?"
       [[ -n "$wact" && "$wact" != "0" ]] && twruntime="$(human_runtime $((now - wact)))"
@@ -934,7 +1049,7 @@ cmd_agents() {
                   | awk '/[[:alnum:]]/ { line=$0 } END { print line }' | head -c 100)"
       [[ -z "$twlast" ]] && twlast="(idle)"
 
-      rows+=("${tsess}"$'\t'"${C_BLU}running${C_RST}"$'\t'"${twagent}"$'\t'"${wname}"$'\t'"${wname}"$'\t'"${twruntime}"$'\t'"${wpath}"$'\t'"${twlast}"$'\t'"${C_CYN}T${C_RST}"$'\t'"${tsess}"$'\t'"—"$'\t'"—")
+      rows+=("${tsess}"$'\t'"${C_BLU}running${C_RST}"$'\t'"${twagent}"$'\t'"${twagent}"$'\t'"${wname}"$'\t'"${twruntime}"$'\t'"${wpath}"$'\t'"${twlast}"$'\t'"${C_CYN}T${C_RST}"$'\t'"${tsess}"$'\t'"—"$'\t'"—")
     done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}'$'\t''#{window_activity}' 2>/dev/null)
   done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
 
@@ -947,24 +1062,70 @@ cmd_agents() {
     return 0
   fi
 
-  # Header
-  printf '%s%-28s  %-8s  %-16s  %-28s  %-8s  %-42s  %s%s%s\n'     "" "SESSION" "TYPE" "AGENT" "NAME/ID" "RUNTIME" "CWD" "$C_DIM" "LAST OUTPUT" "$C_RST"
-  printf '%s\n' "$(printf '─%.0s' {1..160})"
+  # Render as session-grouped cards. Sort by session, then by status
+  # (running first → idle/done last) inside each session.
+  local sorted=()
+  while IFS= read -r line; do sorted+=("$line"); done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k2,2)
 
-  # Sort by session, then status priority (RUN/working first)
-  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k2,2 | while IFS=$'\t' read -r session status agent agent_label name runtime cwd last type_icon orch model persona; do
-    local status_str="$status"
-    # Strip ANSI from status if it's a live status
-    status_str="$(printf '%s' "$status_str" | strip_ansi)"
+  local prev_session=""
+  local sess_color=""
+  local sess_count=0
+  local sess_buffer=()
 
-    printf '%-28s  %s%-8s%s  %-16s  %-28s  %-8s  %-42s  %s%s%s\n'       "$(printf '%.28s' "$session")"       "" "${type_icon}" ""       "$(printf '%.16s' "$agent_label")"       "$(printf '%.28s' "$name")"       "$runtime"       "$(printf '%.42s' "$cwd")"       "$C_DIM" "$(printf '%.80s' "$last")" "$C_RST"
+  _flush_card() {
+    [[ -z "$prev_session" ]] && return
+    [[ "${#sess_buffer[@]}" -eq 0 ]] && return
+    local label="${sess_count} agente"
+    [[ "$sess_count" -ne 1 ]] && label="${sess_count} agentes"
+    printf '\n%s▎%s %s%s%-50s%s  %s%s%s\n' \
+      "$sess_color" "$C_RST" \
+      "$C_BOLD" "$sess_color" "$prev_session" "$C_RST" \
+      "$C_DIM" "$label" "$C_RST"
+    printf '  %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..78})" "$C_RST"
+    local row
+    for row in "${sess_buffer[@]}"; do
+      printf '%s' "$row"
+    done
+  }
 
-    # Attach hint for live panes and discovered tmux-window agents
-    if [[ "$status_str" == "live" || "$status_str" == "working" || "$status_str" == "running" ]]; then
-      printf '  %stmux attach -t %s  →  Ctrl-b w  →  select %s%s\n' "$C_DIM" "$session" "$name" "$C_RST"
+  local row
+  for row in "${sorted[@]}"; do
+    IFS=$'\t' read -r session status agent agent_label name runtime cwd last type_icon orch model persona <<< "$row"
+    local status_str; status_str="$(printf '%s' "$status" | strip_ansi)"
+
+    if [[ "$session" != "$prev_session" ]]; then
+      _flush_card
+      prev_session="$session"
+      sess_color="$(_endy_session_color "$session")"
+      sess_count=0
+      sess_buffer=()
     fi
-    [[ "$agent" == "codex" || "$agent" == "opencode" ]] && _endy_print_agent_stats_line "  " "$agent" "$cwd"
+    sess_count=$((sess_count + 1))
+
+    local bullet; bullet="$(_endy_status_bullet "$status_str")"
+    local last_short; last_short="$(printf '%.80s' "$last")"
+    local agent_show="$agent_label"
+    [[ -z "$agent_show" || "$agent_show" == "—" ]] && agent_show="$agent"
+
+    local entry
+    entry="$(printf '   %s  %s%-10s%s %s%-9s%s  %s%-7s%s  %s%s%s\n' \
+              "$bullet" \
+              "$C_BOLD" "$agent_show" "$C_RST" \
+              "" "$status_str" "" \
+              "$C_DIM" "$runtime" "$C_RST" \
+              "$C_DIM" "$last_short" "$C_RST")"
+    sess_buffer+=("$entry")
+
+    if [[ "$status_str" == "live" || "$status_str" == "working" || "$status_str" == "running" ]]; then
+      sess_buffer+=("$(printf '       %s└─ tmux attach -t %s  →  Ctrl-b w%s\n' "$C_DIM" "$session" "$C_RST")")
+    fi
+    if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
+      local stats_line; stats_line="$(_endy_print_agent_stats_line "       └─ " "$agent" "$cwd")"
+      [[ -n "$stats_line" ]] && sess_buffer+=("$stats_line"$'\n')
+    fi
   done
+  _flush_card
+  printf '\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -1106,15 +1267,9 @@ cmd_tree() {
       cwd_matches_filter "$wpath" "$cwd_filter" || continue
       [[ -z "$orch_filter" || "$tsess" == "$orch_filter" ]] || continue
 
-      local twagent="$wcmd"
-      case "$wname" in
-        *claude*)                twagent="claude" ;;
-        *codex*)                 twagent="codex" ;;
-        *opencode*|oc-*)         twagent="opencode" ;;
-        *cmd-*|*commandcode*)    twagent="cmd" ;;
-        *hermes*)                twagent="hermes" ;;
-        *gemini*)                twagent="gemini" ;;
-      esac
+      local twagent
+      twagent="$(_endy_detect_pane_agent "${tsess}:${wname}" "$wname" "$wcmd")"
+      [[ "$twagent" == "shell" ]] && continue
 
       local twruntime="?"
       [[ -n "$wact" && "$wact" != "0" ]] && twruntime="$(human_runtime $((now - wact)))"
