@@ -133,9 +133,15 @@ _iter_meta_files() {
 _meta_for_id() {
   local id="$1"
   local m
+  # An id resolution is inherently global — the same id never appears in
+  # two log dirs. Always look across every per-dir/* so commands like
+  # `endy watch log <id>` work no matter which session you're in.
+  local saved="${AGGREGATE}"
+  AGGREGATE=1
   while IFS= read -r m; do
-    [[ "$(basename "$m")" == "task-${id}.meta" ]] && { printf '%s\n' "$m"; return 0; }
+    [[ "$(basename "$m")" == "task-${id}.meta" ]] && { printf '%s\n' "$m"; AGGREGATE="$saved"; return 0; }
   done < <(_iter_meta_files)
+  AGGREGATE="$saved"
   return 1
 }
 
@@ -144,12 +150,15 @@ resolve_id() {
   local prefix="$1"
   local matches=()
   local m id
+  local saved="${AGGREGATE}"
+  AGGREGATE=1
   while IFS= read -r m; do
     id="$(basename "$m" .meta | sed 's/^task-//')"
     if [[ "$id" == "$prefix"* || "$id" == *"$prefix"* ]]; then
       matches+=("$id")
     fi
   done < <(_iter_meta_files)
+  AGGREGATE="$saved"
   case "${#matches[@]}" in
     0) echo "no task matching '$prefix'" >&2; return 1 ;;
     1) printf '%s\n' "${matches[0]}" ;;
@@ -609,9 +618,87 @@ log_status() { endy_log_status "$@"; }
 # list — enriched table
 # ---------------------------------------------------------------------------
 
+cmd_list_picker() {
+  local cwd_filter="$1"
+  local orch_filter="$2"
+
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "endy watch list --picker needs fzf. Install fzf or run without --picker." >&2
+    exit 2
+  fi
+  AGGREGATE=1   # picker is implicitly cross-session — that's the point
+
+  local now; now="$(date +%s)"
+  # Build the picker rows: one task per line, tab-separated columns. The
+  # display column comes first; the rest are payload that the preview and
+  # bindings parse back from the selected line.
+  local picker_lines=()
+  local m id log kind status agent cwd window task_session orch orch_label
+  local spawned_iso spawned_epoch runtime last sc_glyph
+  while IFS= read -r m; do
+    id="$(basename "$m" .meta | sed 's/^task-//')"
+    log="$(task_log_path "$m" "$id")"
+    kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    window="$(meta_field "$m" window)"
+    task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+    status="$(log_status "$log" "$id" "$kind" "$task_session")"
+    agent="$(meta_field "$m" agent)"; agent="${agent:-?}"
+    cwd="$(meta_field "$m" cwd)"
+    orch_label="$(task_orchestrator_label "$m")"
+    cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    orch="$(task_orchestrator "$m")"
+    [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
+    spawned_iso="$(meta_field "$m" spawned_at)"
+    spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
+    runtime="?"
+    [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
+    last="—"
+    [[ -f "$log" ]] && last="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
+                                 | tail -1 | strip_ansi | tr -d '\r\n' | head -c 60)"
+    case "$status" in
+      RUN)        sc_glyph="●" ;;
+      PENDING)    sc_glyph="○" ;;
+      DONE)       sc_glyph="●" ;;
+      DONE-ERR)   sc_glyph="▲" ;;
+      FAIL*)      sc_glyph="✕" ;;
+      ABANDONED)  sc_glyph="✕" ;;
+      *)          sc_glyph="·" ;;
+    esac
+    picker_lines+=("$(printf '%s  %-22s  %-9s  %-9s  %-7s  %-22s  %s' \
+                       "$sc_glyph" "$id" "$status" "$agent" "$runtime" \
+                       "$(printf '%.22s' "$orch_label")" "$last")")
+  done < <(_iter_meta_files)
+
+  if [[ "${#picker_lines[@]}" -eq 0 ]]; then
+    echo "(no tasks across all sessions)"
+    echo "spawn one with: endy spawn <agent> -- \"<prompt>\""
+    sleep 2
+    return 0
+  fi
+
+  local self="${ENDY_ROOT}/scripts/_endy-list-preview.sh"
+  # Generate preview helper on the fly to avoid shipping another script. The
+  # bindings re-invoke endy itself for log/view/kill — they're idempotent
+  # and the picker reopens after the action.
+  local fzf_header=$' enter  log     ctrl-v  view    ctrl-y  copy id    ctrl-k  kill    esc  exit'
+  local sel
+  sel="$(printf '%s\n' "${picker_lines[@]}" \
+    | fzf --no-sort --reverse --ansi --header="$fzf_header" \
+          --preview-window='right:60%:wrap' \
+          --preview "id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch view \$id 2>&1 | head -50" \
+          --bind "ctrl-y:execute-silent(echo {} | awk '{print \$2}' | tr -d '\n' | (command -v xclip >/dev/null && xclip -selection clipboard) || (command -v wl-copy >/dev/null && wl-copy) || (command -v clip.exe >/dev/null && clip.exe))" \
+          --bind "ctrl-v:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch view \$id | less -R)" \
+          --bind "ctrl-k:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch kill \$id; sleep 1)+reload(${ENDY_ROOT}/bin/endy watch list 2>/dev/null | grep -E '^[● ○▲✕·]' || true)" \
+          --bind "enter:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch log \$id)" \
+          )"
+  return 0
+}
+
 cmd_list() {
   local cwd_filter=""
   local orch_filter=""
+  local picker=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --cwd|--dir) cwd_filter="$2"; shift 2 ;;
@@ -619,10 +706,16 @@ cmd_list() {
       --overview|--all-sessions) AGGREGATE=1; shift ;;
       --live) LIVE_ONLY=1; shift ;;
       --all|-a) shift ;; # accepted for symmetry with tree; list always shows everything
-      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview] [--live]" >&2; exit 2 ;;
+      --picker|-i) picker=1; shift ;;
+      *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview] [--live] [--picker]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
+
+  if [[ "$picker" == "1" ]]; then
+    cmd_list_picker "$cwd_filter" "$orch_filter"
+    return 0
+  fi
 
   local now; now="$(date +%s)"
   local rows=()

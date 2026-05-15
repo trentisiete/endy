@@ -157,6 +157,37 @@ BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 ")"
 }
 
+# Open the interactive `endy watch list --picker` window. Same auto-relaunch
+# pattern as browse: when the user presses esc/Enter the fzf picker exits,
+# we wait 1 s and reopen it. This keeps the snapshot reasonably fresh while
+# letting the arrow keys actually select a row.
+open_list_picker_window() {
+  local q_session q_log_dir q_endy_root q_args=""
+  q_session="$(printf '%q' "$SESSION")"
+  q_log_dir="$(printf '%q' "$LOG_DIR")"
+  q_endy_root="$(printf '%q' "$ENDY_ROOT")"
+  local a
+  for a in "$@"; do q_args+=" $(printf '%q' "$a")"; done
+
+  kill_window_if_exists list
+  tmux new-window -t "$SESSION" -n list -c "$ENDY_ROOT" \
+    "bash -lc $(printf '%q' "cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
+clear
+export ENDY_SESSION=${q_session}
+export ENDY_LOG_DIR=${q_log_dir}
+printf '\033[1;36mendy watch list \033[0m\033[2m| session=${SESSION} | flechas para navegar | auto-relaunch\033[0m\n'
+printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n'
+printf '\033[1;33menter log | Ctrl-v view | Ctrl-y copy id | Ctrl-k kill | esc salir\033[0m\n\n'
+while :; do
+  cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
+  ${q_endy_root}/bin/endy watch list --picker${q_args}
+  printf '\n\033[2mpicker cerrado — relanzando en 1s. Ctrl-c para shell.\033[0m\n'
+  sleep 1 || break
+done
+BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
+")"
+}
+
 # Open the docs window (README / NEXT_STEPS in less).
 open_docs_window() {
   kill_window_if_exists docs
@@ -189,12 +220,12 @@ open_manager_windows() {
   kill_window_if_exists help
 
   if [[ "$mode" == "overview" ]]; then
-    open_view_window   tree  'endy watch tree - arbol de tareas (todas las sesiones)'  tree --overview --live --all
-    open_view_window   list  'endy watch list - detalle por task (todas las sesiones)' list --overview
+    open_view_window        tree  'endy watch tree - arbol de tareas (todas las sesiones)'  tree --overview --live --all
+    open_list_picker_window
     open_browse_window --overview --live
   else
-    open_view_window   tree  'endy watch tree - arbol de tareas de esta sesion'        tree --all
-    open_view_window   list  'endy watch list - detalle por task de esta sesion'       list
+    open_view_window        tree  'endy watch tree - arbol de tareas de esta sesion'        tree --all
+    open_list_picker_window
     open_browse_window
   fi
   open_docs_window
