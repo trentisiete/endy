@@ -1,8 +1,10 @@
 {
   "name": "@noetiklab/endy",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Hand a coding task from one CLI agent to another when its free tier runs out. tmux-based control plane for codex, opencode, cmd, hermes, gemini.",
-  "bin": { "endy": "bin/endy" },
+  "bin": {
+    "endy": "bin/endy"
+  },
   "scripts": {
     "postinstall": "node scripts/postinstall.js"
   },
@@ -19,11 +21,21 @@
     "README.md",
     "LICENSE"
   ],
-  "os": ["darwin", "linux"],
-  "engines": { "node": ">=18" },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "homepage": "https://github.com/trentisiete/endy",
-  "repository": { "type": "git", "url": "git+https://github.com/trentisiete/endy.git" },
-  "bugs": { "url": "https://github.com/trentisiete/endy/issues" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trentisiete/endy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/trentisiete/endy/issues"
+  },
   "keywords": [
     "tmux",
     "multi-agent",
