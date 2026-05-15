@@ -25,7 +25,9 @@ endy live open <name> <agent> [--cwd <dir>] [--model <m>] [--persona <p>] [--ful
 ```
 
 - `<name>` — meaningful name chosen by you (e.g., `claude-review`, `cmd-design`)
-- `<agent>` — one of: `claude`, `cmd`, `opencode`, `hermes`, `codex`
+- `<agent>` — one of: `claude`, `cmd`, `opencode`, `hermes`, `codex`, `bash`
+
+The window is a **real interactive terminal**: the agent owns the pty, draws its TUI normally, can launch its own subagents/commands, and you drive it via `send`/`capture`. Output is mirrored to `.logs/.../live-<name>.log` via `tmux pipe-pane` (does not interfere with the TUI). Use `bash` (alias `shell`) when you just want a raw shell window — handy as a generic subagent terminal where you run commands manually.
 - `--cwd` — working directory for the agent (default: current directory)
 - `--model` — model override (agent-specific: supported by claude/opencode/hermes)
 - `--persona` — persona/skill name (opencode: `--agent`, hermes: `--skills`)
