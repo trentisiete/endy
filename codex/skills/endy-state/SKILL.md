@@ -54,13 +54,38 @@ tier headroom:
   cmd:      unknown
 ```
 
-The `unknown` source on a tier means we have no signal for it yet (Phase 2 of endy state will add stderr-detected fallbacks). Don't assume an `unknown` tier is exhausted — assume nothing.
+The `unknown` source on a tier means we have no signal for it yet — a
+future expansion will add stderr-detected fallbacks (this is part of
+[Phase 4 in the project roadmap](../../../docs/roadmap.md): auto-detection
+of exhaustion from CLI stderr signals). Don't assume an `unknown` tier
+is exhausted — assume nothing.
+
+Tier data for the routed providers comes from `multiplexor status
+--json [agent]` — a stable JSON contract that exposes
+`exhausted_seconds_remaining` and the live `selected` provider. If
+multiplexor is installed (it is, after `endy install`), `endy state`
+queries it directly; otherwise the routing rows show as `unknown` and
+the rest of the snapshot still renders.
 
 ## Auto-injection in spawn prompts
 
 `scripts/spawn-long-task.sh` calls `endy state --task-id <new-task-id> --format prompt` before writing the prompt file, so every spawned agent sees the environment block at the top of its first prompt. Bypass with `--no-state` for offline stubs or strictly clean prompts.
 
 That's why you don't need to invoke `endy state` on turn 1 of a handed-off task — the block is already there. Invoke it later turns to refresh (tier headroom changes per turn).
+
+### Behavior during handoff
+
+`endy handoff` spawns a new task via the same `spawn-long-task.sh`, so
+the child gets its OWN fresh state block — generated from *its* point
+of view (it sees itself as the new last link, the previous agent is
+behind it in the chain, the cwd is inherited from the parent). The
+block is not copy-pasted from the parent; it is recomputed.
+
+The parent's full prompt (which itself starts with a `## endy
+environment` block) is embedded verbatim inside the child's `--- original
+task prompt ---` section, so the child can also see what context the
+parent had — but the source of truth for "who am I right now" is the
+child's own freshly generated block at the very top.
 
 ## JSON schema (stable)
 
