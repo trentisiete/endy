@@ -854,13 +854,57 @@ cmd_tree() {
     rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${task_session}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}")
   done < <(_iter_meta_files)
 
+  # --- Live panes (endy live open) ---
+  # Each live-*.meta in scope contributes a row, grouped under its owning
+  # session-as-orchestrator and its cwd, so the tree reflects both ways of
+  # launching agents (spawned tasks + interactive live panes).
+  local log_dir lm
+  while IFS= read -r log_dir; do
+    [[ -d "$log_dir" ]] || continue
+    local lsess
+    if [[ "$log_dir" == "${ENDY_ROOT}/.logs" ]]; then
+      lsess="endy"
+    else
+      lsess="$(basename "$log_dir")"
+    fi
+    shopt -s nullglob
+    for lm in "${log_dir}"/live-*.meta; do
+      local lname; lname="$(basename "$lm" .meta | sed 's/^live-//')"
+      tmux list-windows -t "$lsess" -F '#W' 2>/dev/null | grep -qxF "$lname" || continue
+
+      local lcwd; lcwd="$(meta_field "$lm" cwd)"; lcwd="${lcwd:-?}"
+      local lagent; lagent="$(meta_field "$lm" agent)"; lagent="${lagent:-?}"
+      local lmodel; lmodel="$(meta_field "$lm" model)"; lmodel="${lmodel:-—}"
+      cwd_matches_filter "$lcwd" "$cwd_filter" || continue
+      [[ -z "$orch_filter" || "$lsess" == "$orch_filter" ]] || continue
+
+      local llog="${log_dir}/live-${lname}.log"
+      local lstatus="ready"
+      if [[ -f "$llog" ]]; then
+        local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
+        [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
+      fi
+      local lmeta_mtime; lmeta_mtime="$(stat -c %Y "$lm" 2>/dev/null || echo "$now")"
+      local lruntime; lruntime="$(human_runtime $((now - lmeta_mtime)))"
+      local llast="(idle)"
+      if [[ -f "$llog" ]]; then
+        llast="$(tail -n 80 "$llog" 2>/dev/null | strip_ansi | tr -d '\r' | tr '\t' ' ' \
+                  | awk '/[[:alnum:]]/ { line=$0 } END { print line }' | head -c 90)"
+        [[ -z "$llast" ]] && llast="(idle)"
+      fi
+      local lid="live:${lsess}:${lname}"
+      rows+=("${lsess}"$'\t'"${lsess}"$'\t'"${lcwd}"$'\t'"${lsess}"$'\t'"${lid}"$'\t'"${lstatus}"$'\t'"${lagent}"$'\t'"${lmodel}"$'\t'"live"$'\t'"—"$'\t'"${lruntime}"$'\t'"${llast}")
+    done
+    shopt -u nullglob
+  done < <(_aggregate_log_dirs)
+
   if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
-      [[ "$AGGREGATE" == "1" ]] && echo "(no tasks across all sessions)" || echo "(no tasks in ${LOG_DIR})"
+      [[ "$AGGREGATE" == "1" ]] && echo "(no agents across all sessions)" || echo "(no agents in ${LOG_DIR})"
     elif [[ "$AGGREGATE" == "1" ]]; then
-      echo "(no active tasks; use 'endy watch tree --overview --all' to include finished tasks across sessions)"
+      echo "(no active agents; use 'endy watch tree --overview --all' to include finished tasks across sessions)"
     else
-      echo "(no active tasks; use 'endy watch tree --all' to include finished tasks)"
+      echo "(no active agents; use 'endy watch tree --all' to include finished tasks)"
     fi
     return
   fi
