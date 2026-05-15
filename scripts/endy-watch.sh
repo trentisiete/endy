@@ -708,11 +708,12 @@ cmd_list_picker() {
   # Two lines so every key fits regardless of preview width. fzf renders
   # \n inside header verbatim.
   local fzf_header
-  printf -v fzf_header ' %s   %s   %s\n %s   %s   %s   %s' \
-    'enter→tmux pane' 'ctrl-l→log'   'ctrl-v→view' \
-    'ctrl-y→copy id' 'ctrl-k→kill'  'ctrl-x→clean abandoned' 'esc→salir'
+  printf -v fzf_header ' %s   %s   %s   %s\n %s   %s   %s   %s' \
+    'enter→pane'      'ctrl-space→split'   'ctrl-l→log'   'ctrl-v→view' \
+    'ctrl-y→copy id'  'ctrl-k→kill'        'ctrl-x→clean abandoned' 'esc→salir'
   local binds=(
     --bind "enter:execute(${ENDY_ROOT}/bin/endy watch attach {2})+abort"
+    --bind "ctrl-space:execute(${ENDY_ROOT}/bin/endy watch live {2})"
     --bind "ctrl-l:execute(${ENDY_ROOT}/bin/endy watch log {2})"
     --bind "ctrl-v:execute(${ENDY_ROOT}/bin/endy watch view {2})"
     --bind "ctrl-k:execute(${ENDY_ROOT}/bin/endy watch kill {2})+abort"
@@ -1710,26 +1711,50 @@ cmd_peek() {
   fi
   printf '%s╰%s%s\n' "$sess_color" "$_RULE" "$C_RST"
 
-  # ── separador con label "agent output" ──
-  printf '\n%s── output del agente ──%s\n\n' "$C_DIM" "$C_RST"
-
-  # ── body: el TUI vivo si la window existe, si no el log filtrado ──
-  # `tmux capture-pane -e` preserva los códigos ANSI del propio CLI del
-  # agente, así que lo que verás aquí es literalmente su chat: prompts,
-  # respuestas, indicadores, todo con sus colores. Capturamos el buffer
-  # entero (-S -) y dejamos que el preview window lo scrollee.
+  # ── body: el TUI no se puede "embeber" en el preview de fzf — tmux no
+  # permite que un mismo pane viva en dos windows. Lo mejor que puede dar
+  # un preview es una captura de texto, que para CLIs muy interactivos
+  # (codex, opencode, claude) se siente plana. Por eso aquí mostramos:
+  #   - solo metadata estructurada (la caja arriba)
+  #   - un footer guía con cómo VER el TUI vivo: enter, o split lateral.
+  # Se puede activar el body de capture-pane con ENDY_PEEK_BODY=1 si
+  # alguien lo prefiere para grep en CI o vistas no-interactivas.
   local target="${task_session}:${task_window}"
+  local target_alive=0
   if tmux has-session -t "$task_session" 2>/dev/null \
        && tmux list-windows -t "$task_session" -F '#W' 2>/dev/null \
             | grep -qxF "$task_window"; then
-    tmux capture-pane -t "$target" -p -e -S - 2>/dev/null \
-      | _endy_strip_env_block \
-      | tail -n 200 \
-      | head -c 65536
+    target_alive=1
+  fi
+
+  if [[ "${ENDY_PEEK_BODY:-0}" == "1" ]]; then
+    # Legacy/CI mode: print the captured pane as text below the card.
+    printf '\n%s── output (snapshot) ──%s\n\n' "$C_DIM" "$C_RST"
+    if [[ "$target_alive" == "1" ]]; then
+      tmux capture-pane -t "$target" -p -e -S - 2>/dev/null \
+        | _endy_strip_env_block | tail -n 200 | head -c 65536
+    elif [[ -f "$log" ]]; then
+      printf '  %s(window cerrada — mostrando log)%s\n\n' "$C_DIM" "$C_RST"
+      grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
+        | _endy_strip_env_block | tail -n 200 | tr -d '\r'
+    else
+      printf '  %s(no window, no log)%s\n' "$C_DIM" "$C_RST"
+    fi
+    return 0
+  fi
+
+  # Default: footer guía. The picker keys take you to the live thing.
+  printf '\n'
+  if [[ "$target_alive" == "1" ]]; then
+    printf '  %s── chat del agente (vivo en tmux) ──%s\n\n' "$C_DIM" "$C_RST"
+    printf '  %s%senter%s    abre el pane vivo (\033[2mtmux switch a %s\033[0m)\n' "" "$C_BOLD" "$C_RST" "$target"
+    printf '  %s%sctrl-space%s   split lateral persistente (sigue capturando cada 2s)\n' "" "$C_BOLD" "$C_RST"
+    printf '  %s%sctrl-l%s    log estructurado en less +F\n' "" "$C_BOLD" "$C_RST"
+    printf '  %s%sctrl-v%s    snapshot completo (meta + log)\n' "" "$C_BOLD" "$C_RST"
   elif [[ -f "$log" ]]; then
-    printf '  %s(window cerrada — mostrando log)%s\n\n' "$C_DIM" "$C_RST"
+    printf '  %s── log (window cerrada) ──%s\n\n' "$C_DIM" "$C_RST"
     grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
-      | _endy_strip_env_block | tail -n 200 | tr -d '\r'
+      | _endy_strip_env_block | tail -n 60 | tr -d '\r'
   else
     printf '  %s(no window, no log)%s\n' "$C_DIM" "$C_RST"
   fi
@@ -2192,6 +2217,7 @@ cmd_browse() {
   # user never has to wrestle with terminal selection.
   local binds=(
     "--bind=enter:execute(${BASH_SOURCE[0]} _jump {2})+abort"
+    "--bind=ctrl-space:execute(${ENDY_ROOT}/bin/endy watch live {2})"
     "--bind=ctrl-g:execute(${BASH_SOURCE[0]} _jump {2})+abort"
     "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {2})"
     "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {2})"
@@ -2741,6 +2767,47 @@ cmd_gc() {
 # purge — delete a task family from .logs/ and kill its tmux windows
 # ---------------------------------------------------------------------------
 
+cmd_split_live() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch live <id>
+
+Splits the current tmux pane horizontally and shows a live mirror of
+the task's window: `tmux capture-pane` refreshing every 2 s. Closes
+the split when you Ctrl-C.
+
+Use this when you want the picker AND the agent's chat side-by-side
+without losing your spot in the picker.
+
+Note: tmux can't link the same pane into two windows, so the split is
+a refreshing snapshot of the agent's TUI, not the live pane itself.
+For the actual live interaction, use `endy watch attach <id>`.
+EOF
+    return 0
+  fi
+  local prefix="${1:-}"
+  [[ -n "$prefix" ]] || { echo "usage: endy watch live <id>" >&2; exit 2; }
+  local id; id="$(resolve_id "$prefix")" || exit 1
+  local meta; meta="$(_meta_for_id "$id")"
+  local window; window="$(meta_field "$meta" window)"
+  local target_session="${window%%:*}"
+  local target_window="${window##*:}"
+  if ! tmux has-session -t "$target_session" 2>/dev/null \
+       || ! tmux list-windows -t "$target_session" -F '#W' 2>/dev/null \
+              | grep -qxF "$target_window"; then
+    echo "endy watch live: window ${window} no longer exists (try 'endy watch view ${id}')" >&2
+    exit 1
+  fi
+  if [[ -z "${TMUX:-}" ]]; then
+    echo "endy watch live needs to be run from inside tmux (we split the current pane)" >&2
+    echo "alternatives: 'endy watch attach ${id}' or 'endy watch view ${id}'" >&2
+    exit 1
+  fi
+  # Watch -c keeps ANSI colours; -t suppresses the watch header line.
+  tmux split-window -h -p 50 \
+    "watch -c -n 2 -t \"tmux capture-pane -t '${window}' -p -e -S -\"; sleep 0.2"
+}
+
 cmd_clean_abandoned() {
   if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<'EOF'
@@ -3102,6 +3169,7 @@ case "${1:-attach}" in
   view)          shift; cmd_view "$@" ;;
   peek)          shift; cmd_peek "$@" ;;
   handoffs)      shift; cmd_handoffs "$@" ;;
+  live)          shift; cmd_split_live "$@" ;;
   clean-abandoned|clean) shift; cmd_clean_abandoned "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
