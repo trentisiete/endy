@@ -1403,7 +1403,11 @@ cmd_dir() {
   local dir="${1:-}"
   [[ -n "$dir" ]] || { echo "usage: endy watch dir <path> [--all] [--orch <name>]" >&2; exit 2; }
   shift
-  cmd_tree --cwd "$dir" "$@"
+  # Querying by directory is inherently cross-session: a path under /work/X
+  # might be the cwd of agents owned by endy-x, endy-y, or both. Defaulting
+  # to overview/aggregate mode avoids "no agents" false negatives when the
+  # caller runs `endy watch dir` from a different session than the target.
+  cmd_tree --cwd "$dir" --overview "$@"
 }
 
 # ---------------------------------------------------------------------------
