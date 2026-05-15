@@ -54,7 +54,7 @@ _endy_complete() {
   # spawn / chat / handoff also accept the offline `bash` stub for smoke
   # tests of the runtime without burning real-agent credits.
   local spawn_agents="codex opencode cmd hermes claude gemini bash"
-  local watch_subs="list tree dir log chat attach panel browse follow view peek handoffs followup kill kill-all gc purge delete purge-session"
+  local watch_subs="list tree dir log chat attach panel browse follow view peek handoffs clean-abandoned clean followup kill kill-all gc purge delete purge-session"
   local help_topics="opencode cmd hermes claude gemini tmux"
   local web_opts="--localhost --host --port --token"
   local spawn_opts="--full-auto --supervised --persona --model --cwd --max-turns --orchestrator --orchestrator-agent --parent-task --resume --skills --"
