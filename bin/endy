@@ -260,7 +260,19 @@ cmd_overview() {
   ENDY_SESSION="endy" ENDY_LOG_DIR="${ENDY_ROOT}/.logs" \
     exec "${SCRIPTS}/start.sh" --mode=overview "$@"
 }
-cmd_status()   { exec "${SCRIPTS}/status.sh"  "$@"; }
+cmd_status()   {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy status
+
+Prints the current cwd's tmux session, its windows, the Codex MCP servers
+attached to its orchestrator pane, Tailscale state, and the list of every
+endy* tmux session running on the host.
+EOF
+    return 0
+  fi
+  exec "${SCRIPTS}/status.sh"  "$@"
+}
 cmd_watch()    { exec "${SCRIPTS}/endy-watch.sh" "$@"; }
 cmd_web()      { exec python3 "${ENDY_ROOT}/web/server.py" "$@"; }
 cmd_tmux_help(){ ENDY_SESSION="$SESSION" exec "${SCRIPTS}/tmux-help.sh" "$@"; }
@@ -283,6 +295,13 @@ cmd_stop() {
   local stop_all=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -h|--help)
+        cat <<'EOF'
+usage: endy stop                       kill the current cwd's endy session
+       endy stop --session <name>      kill one named endy tmux session
+       endy stop --all                 kill every endy* tmux session
+EOF
+        return 0 ;;
       --all)               stop_all=1; shift ;;
       --session)           target="$2"; shift 2 ;;
       *) die "unknown stop arg: $1 (try --all or --session <name>)" ;;
@@ -312,6 +331,17 @@ cmd_stop() {
 }
 
 cmd_doctor() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy doctor
+
+Checks that endy's prerequisites are satisfied: tmux, python3, every
+supported agent CLI on PATH (codex/opencode/cmd/hermes/claude/gemini),
+the ~/.codex/AGENTS.md symlink, the cmd model config, the running tmux
+sessions, the multiplexor install, and ENDY_HANDOFF_RESOLVER wiring.
+EOF
+    return 0
+  fi
   local ok=1
   printf 'tmux ............ '
   if command -v tmux >/dev/null; then printf '✓ %s\n' "$(tmux -V)"; else printf '✗ missing\n'; ok=0; fi
@@ -499,8 +529,30 @@ exec ${quoted_argv}
 }
 
 cmd_spawn() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy spawn <agent> [opts] -- <prompt>
+       endy spawn <agent> [opts] --prompt-file <path>
+       cmd ... | endy spawn <agent> [opts]      (prompt from stdin)
+
+agents: codex, opencode, cmd, hermes, claude, gemini, bash (offline stub)
+
+opts:
+  --supervised               opt out of --full-auto
+  --persona <name>           opencode/hermes only
+  --model <model>            opencode/hermes only
+  --cwd <dir>                override working directory
+  --max-turns <n>            cmd/hermes (default 200)
+  --orchestrator <name>      logical parent label
+  --orchestrator-agent <ag>  logical parent agent
+  --parent-task <id>         spawn-time lineage
+  --resume <id>              same-agent native resume
+  --skills <list>            opencode/hermes skill bundle
+EOF
+    return 0
+  fi
   local agent="${1:-}"
-  [[ -n "$agent" ]] || die "usage: endy spawn <agent> [opts] -- <prompt>"
+  [[ -n "$agent" ]] || die "usage: endy spawn <agent> [opts] -- <prompt>  (try 'endy spawn --help')"
   shift
 
   # Default: --full-auto. User can override with --supervised.
@@ -543,8 +595,18 @@ cmd_spawn() {
 
 cmd_ask() {
   # Short blocking call. Output goes to current stdout.
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy ask <agent> [--model X] [--persona X] [--skills X] <prompt>
+       cmd ... | endy ask <agent>     (prompt from stdin when no positional)
+
+agents: codex, opencode, cmd, hermes, claude, gemini
+        (no bash stub — ask is one-shot blocking, the stub has nothing to answer)
+EOF
+    return 0
+  fi
   local agent="${1:-}"
-  [[ -n "$agent" ]] || die "usage: endy ask <agent> [opts] <prompt>"
+  [[ -n "$agent" ]] || die "usage: endy ask <agent> [opts] <prompt>  (try 'endy ask --help')"
   shift
 
   local extra=()
@@ -587,8 +649,19 @@ cmd_handoff() {
 }
 
 cmd_chat() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy chat <agent> [--persona X] [--model X] [--cwd DIR] [--resume ID]
+                         [--orchestrator X] [--orchestrator-agent X]
+                         [--full-auto] [--no-select]
+
+Opens an interactive agent in a new tmux window in the current session.
+agents: opencode, cmd, claude, hermes, gemini, bash (offline stub)
+EOF
+    return 0
+  fi
   local agent="${1:-}"
-  [[ -n "$agent" ]] || die "usage: endy chat <agent> [--persona X] [--model X] [--cwd DIR] [--resume ID] [--orchestrator X] [--orchestrator-agent X] [--full-auto] [--no-select]"
+  [[ -n "$agent" ]] || die "usage: endy chat <agent> [...]  (try 'endy chat --help')"
   shift
 
   local args=(--agent "$agent")

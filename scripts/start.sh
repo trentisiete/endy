@@ -3,14 +3,15 @@
 #
 # Layout (per-dir mode):
 #   orchestrator  — interactive Codex in the project cwd
-#   browse        — `endy watch browse` interactive picker
+#   tree          — `endy watch tree`     auto-refreshing task tree
+#   list          — `endy watch list`     per-task detail with ids
+#   browse        — `endy watch browse`   interactive picker
 #   docs          — README / NEXT_STEPS
 #
 # Layout (overview mode — pure management session, no orchestrator):
-#   tree          — `endy watch tree`     full task tree, all sessions
-#   browse        — `endy watch browse`   interactive agent/tmux picker
-#   sessions      — `endy watch sessions` per-session summary
-#   agents        — `endy watch agents`   unified active-agents view
+#   tree          — `endy watch tree --overview --live --all`
+#   list          — `endy watch list --overview`
+#   browse        — `endy watch browse --overview --live`
 #   docs          — README / NEXT_STEPS
 #
 # Optional:
