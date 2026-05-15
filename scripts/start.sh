@@ -108,13 +108,21 @@ open_view_window() {
   tmux new-window -t "$SESSION" -n "$window" -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
+# In-place redraw: clear once at start, then on each tick home the cursor
+# and rewrite — never call \\\`clear\\\` again. To avoid leftover characters
+# when a new line is shorter than the previous, every output line gets
+# clear-to-EOL appended via awk. The final clear-to-end wipes lines below
+# the last one written (when the table shrinks between ticks).
+# Override cadence: ENDY_REFRESH_INTERVAL (seconds; default 2).
+clear
 while :; do
   cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
-  clear
-  printf '\033[1;36m${title}\033[0m \033[2m| session=${SESSION} | auto-refresh 2s | Ctrl-c -> shell\033[0m\n'
-  printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n\n'
-  ${q_endy_root}/bin/endy watch${q_args} || true
-  sleep 2 || break
+  printf '\033[H'
+  printf '\033[1;36m${title}\033[0m \033[2m| session=${SESSION} | refresh ${ENDY_REFRESH_INTERVAL:-2}s (no flicker) | Ctrl-c -> shell\033[0m\033[K\n'
+  printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\033[K\n\033[K\n'
+  { ${q_endy_root}/bin/endy watch${q_args} 2>&1 || true; } | awk '{printf \"%s\033[K\n\", \$0}'
+  printf '\033[J'
+  sleep \${ENDY_REFRESH_INTERVAL:-2} || break
 done
 BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 ")"
