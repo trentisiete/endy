@@ -768,6 +768,59 @@ cmd_agents() {
     shopt -u nullglob
   done
 
+  # --- Discovered tmux windows ---
+  # Any window in a running endy* session that isn't already covered by a
+  # task or live-pane meta. Covers panes opened manually (tmux new-window
+  # claude) and sessions owned by a different endy install (e.g. npm
+  # @noetiklab/endy) whose meta files don't live in our ENDY_ROOT.
+  local seen_windows=()
+  local _r
+  for _r in "${rows[@]}"; do
+    local _rs _rn
+    IFS=$'\t' read -r _rs _ _ _ _rn _ <<< "$_r"
+    seen_windows+=("${_rs}:${_rn}")
+  done
+
+  local tsess
+  while IFS= read -r tsess; do
+    [[ -n "$tsess" ]] || continue
+    while IFS=$'\t' read -r wname wcmd wpath wact; do
+      [[ -n "$wname" ]] || continue
+      case "$wname" in
+        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|opencode|logs|__bootstrap) continue ;;
+        task-*|chat-*|follow-*|diag*) continue ;;
+      esac
+      local key="${tsess}:${wname}"
+      local already=0 sw
+      for sw in "${seen_windows[@]}"; do
+        [[ "$sw" == "$key" ]] && { already=1; break; }
+      done
+      [[ "$already" == "1" ]] && continue
+
+      cwd_matches_filter "$wpath" "$cwd_filter" || continue
+      [[ -z "$orch_filter" || "$tsess" == "$orch_filter" ]] || continue
+
+      local twagent="$wcmd"
+      case "$wname" in
+        *claude*)                twagent="claude" ;;
+        *codex*)                 twagent="codex" ;;
+        *opencode*|oc-*)         twagent="opencode" ;;
+        *cmd-*|*commandcode*)    twagent="cmd" ;;
+        *hermes*)                twagent="hermes" ;;
+      esac
+
+      local twruntime="?"
+      [[ -n "$wact" && "$wact" != "0" ]] && twruntime="$(human_runtime $((now - wact)))"
+      local twlast
+      twlast="$(tmux capture-pane -t "${tsess}:${wname}" -p -S -10 2>/dev/null \
+                  | strip_ansi | tr -d '\r' | tr '\t' ' ' \
+                  | awk '/[[:alnum:]]/ { line=$0 } END { print line }' | head -c 100)"
+      [[ -z "$twlast" ]] && twlast="(idle)"
+
+      rows+=("${tsess}"$'\t'"${C_BLU}running${C_RST}"$'\t'"${twagent}"$'\t'"${wname}"$'\t'"${wname}"$'\t'"${twruntime}"$'\t'"${wpath}"$'\t'"${twlast}"$'\t'"${C_CYN}T${C_RST}"$'\t'"${tsess}"$'\t'"—"$'\t'"—")
+    done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}'$'\t''#{window_activity}' 2>/dev/null)
+  done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
+
   if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
       echo "(no agents across any session)"
@@ -789,8 +842,8 @@ cmd_agents() {
 
     printf '%-28s  %s%-8s%s  %-16s  %-28s  %-8s  %-42s  %s%s%s\n'       "$(printf '%.28s' "$session")"       "" "${type_icon}" ""       "$(printf '%.16s' "$agent_label")"       "$(printf '%.28s' "$name")"       "$runtime"       "$(printf '%.42s' "$cwd")"       "$C_DIM" "$(printf '%.80s' "$last")" "$C_RST"
 
-    # Attach hint for live panes
-    if [[ "$status_str" == "live" || "$status_str" == "working" ]]; then
+    # Attach hint for live panes and discovered tmux-window agents
+    if [[ "$status_str" == "live" || "$status_str" == "working" || "$status_str" == "running" ]]; then
       printf '  %stmux attach -t %s  →  Ctrl-b w  →  select %s%s\n' "$C_DIM" "$session" "$name" "$C_RST"
     fi
   done
@@ -897,6 +950,62 @@ cmd_tree() {
     done
     shopt -u nullglob
   done < <(_aggregate_log_dirs)
+
+  # --- Discovered tmux windows ---
+  # Any agent-looking window in a running endy* session that isn't already
+  # covered by a meta file (task or live). Catches panes opened manually
+  # (tmux new-window claude) AND sessions owned by a different endy install
+  # (e.g. npm @noetiklab/endy) whose meta files live elsewhere — without
+  # this, those agents are invisible.
+  local _seen=()
+  local _r
+  for _r in "${rows[@]}"; do
+    local _rs5  # row column 5 = id (live:sess:name) or task id
+    IFS=$'\t' read -r _ _ _ _ _rs5 _ <<< "$_r"
+    if [[ "$_rs5" == live:* ]]; then
+      _seen+=("${_rs5#live:}")
+    fi
+  done
+
+  local tsess
+  while IFS= read -r tsess; do
+    [[ -n "$tsess" ]] || continue
+    while IFS=$'\t' read -r wname wcmd wpath wact; do
+      [[ -n "$wname" ]] || continue
+      case "$wname" in
+        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|opencode|logs|__bootstrap) continue ;;
+        task-*|chat-*|follow-*|diag*) continue ;;
+      esac
+      local key="${tsess}:${wname}"
+      local already=0 sw
+      for sw in "${_seen[@]}"; do
+        [[ "$sw" == "$key" ]] && { already=1; break; }
+      done
+      [[ "$already" == "1" ]] && continue
+
+      cwd_matches_filter "$wpath" "$cwd_filter" || continue
+      [[ -z "$orch_filter" || "$tsess" == "$orch_filter" ]] || continue
+
+      local twagent="$wcmd"
+      case "$wname" in
+        *claude*)                twagent="claude" ;;
+        *codex*)                 twagent="codex" ;;
+        *opencode*|oc-*)         twagent="opencode" ;;
+        *cmd-*|*commandcode*)    twagent="cmd" ;;
+        *hermes*)                twagent="hermes" ;;
+      esac
+
+      local twruntime="?"
+      [[ -n "$wact" && "$wact" != "0" ]] && twruntime="$(human_runtime $((now - wact)))"
+      local twlast
+      twlast="$(tmux capture-pane -t "${tsess}:${wname}" -p -S -10 2>/dev/null \
+                  | strip_ansi | tr -d '\r' | tr '\t' ' ' \
+                  | awk '/[[:alnum:]]/ { line=$0 } END { print line }' | head -c 90)"
+      [[ -z "$twlast" ]] && twlast="(idle)"
+
+      rows+=("${tsess}"$'\t'"${tsess}"$'\t'"${wpath}"$'\t'"${tsess}"$'\t'"${wname}"$'\t'"running"$'\t'"${twagent}"$'\t'"—"$'\t'"tmux"$'\t'"—"$'\t'"${twruntime}"$'\t'"${twlast}")
+    done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}'$'\t''#{window_activity}' 2>/dev/null)
+  done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
 
   if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
