@@ -507,26 +507,26 @@ cmd_sessions() {
     C_CYN=$'\033[36m'
   fi
 
-  # Enumerate active per-dir sessions
-  local root="${ENDY_ROOT}/.logs/per-dir"
+  # Enumerate every running tmux session named endy / endy-* so the dashboard
+  # reflects ALL active endy tmuxes, including those owned by another endy
+  # install (e.g. the npm @noetiklab/endy package) whose log dir lives outside
+  # our ENDY_ROOT — those are shown as "external" with the attach hint but no
+  # stats, so nothing is silently invisible.
   local sessions=()
-
-  if [[ -d "$root" ]]; then
-    shopt -s nullglob
-    local d session_name
-    for d in "${root}"/*/; do
-      [[ -d "$d" ]] || continue
-      session_name="$(basename "${d%/}")"
-      # Only include if tmux session is running
-      tmux has-session -t "$session_name" 2>/dev/null || continue
-      sessions+=("$session_name"$'\t'"$d")
-    done
-    shopt -u nullglob
-  fi
+  while IFS= read -r session_name; do
+    [[ -n "$session_name" ]] || continue
+    local d
+    if [[ "$session_name" == "endy" ]]; then
+      d="${ENDY_ROOT}/.logs/"
+    else
+      d="${ENDY_ROOT}/.logs/per-dir/${session_name}/"
+    fi
+    sessions+=("$session_name"$'\t'"$d")
+  done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
 
   if [[ "${#sessions[@]}" -eq 0 ]]; then
-    echo "(no active per-dir sessions)"
-    echo "start one with: endy start"
+    echo "(no active sessions)"
+    echo "start one with: endy start  (or: endy overview)"
     return 0
   fi
 
@@ -537,6 +537,19 @@ cmd_sessions() {
   for entry in "${sessions[@]}"; do
     local session_name="${entry%%$'\t'*}"
     local log_dir="${entry#*$'\t'}"
+
+    # External session: tmux session is alive but no log dir under this endy
+    # (typically a session created by a different endy install — e.g. the npm
+    # @noetiklab/endy package). Show it so it's not invisible.
+    if [[ ! -d "$log_dir" ]]; then
+      local nwin; nwin="$(tmux list-windows -t "$session_name" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
+      printf '%-28s  %s%s%s  %s%s%s\n' \
+        "$session_name" \
+        "$C_DIM" "${nwin} ventanas tmux (sesion externa)" "$C_RST" \
+        "$C_DIM" "—" "$C_RST"
+      printf '  %stmux attach -t %s%s\n\n' "$C_DIM" "$session_name" "$C_RST"
+      continue
+    fi
 
     # Count tasks by status
     local run_count=0 pending_count=0 done_count=0 fail_count=0 abandoned_count=0
@@ -620,6 +633,7 @@ cmd_sessions() {
 # ---------------------------------------------------------------------------
 
 cmd_agents() {
+  AGGREGATE=1
   local include_all=0
   local cwd_filter=""
   local orch_filter=""
@@ -737,7 +751,7 @@ cmd_agents() {
       fi
 
       local llast="—"
-      [[ -f "$llog" ]] && llast="$(tail -1 "$llog" 2>/dev/null | tr -d '\r\n' | head -c 100)"
+      [[ -f "$llog" ]] && llast="$(tail -1 "$llog" 2>/dev/null | strip_ansi | tr -d '\r\n' | head -c 100)"
 
       # Uptime from meta file
       local lmeta_mtime; lmeta_mtime="$(stat -c %Y "$lm" 2>/dev/null || echo "$now")"
@@ -1078,6 +1092,7 @@ cmd_browse() {
       cwd_short="$cwd"
     fi
 
+    local window; window="$(meta_field "$m" window)"
     local session_label=""
     if [[ "$AGGREGATE" == "1" ]]; then
       local browse_session="${window%%:*}"

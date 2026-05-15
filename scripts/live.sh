@@ -46,8 +46,10 @@ require_session() {
 require_window() {
   local target="$1"
   local wname="${target##*:}"
-  if ! tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qxF "$wname"; then
-    echo "endy live: window '$target' not found in session '$SESSION'" >&2
+  local wsess="$SESSION"
+  [[ "$target" == *:* ]] && wsess="${target%%:*}"
+  if ! tmux list-windows -t "$wsess" -F '#W' 2>/dev/null | grep -qxF "$wname"; then
+    echo "endy live: window '$target' not found in session '$wsess'" >&2
     exit 4
   fi
 }
@@ -57,8 +59,10 @@ require_window() {
 send_text_to_pane() {
   local target="$1" text="$2"
   printf '%s' "$text" | tmux load-buffer -b endy-live-send -
-  tmux paste-buffer -b endy-live-send -t "$target"
-  tmux delete-buffer -b endy-live-send 2>/dev/null || true
+  tmux paste-buffer -d -b endy-live-send -t "$target"
+  # Let the TUI ingest the pasted text before submitting — without this the
+  # Enter can race ahead of the paste and land as an empty submit.
+  sleep 0.15
   tmux send-keys -t "$target" Enter
 }
 
@@ -96,8 +100,13 @@ build_agent_cmd() {
     codex)
       printf 'codex'
       ;;
+    bash|shell)
+      # Plain interactive shell — useful as a "raw terminal" subagent
+      # window (manual commands, ad-hoc subagents launched by hand).
+      printf 'bash -l'
+      ;;
     *)
-      echo "endy live: unknown agent '$agent' (try: claude, cmd, opencode, hermes, codex)" >&2
+      echo "endy live: unknown agent '$agent' (try: claude, cmd, opencode, hermes, codex, bash)" >&2
       exit 2
       ;;
   esac
@@ -113,8 +122,8 @@ write_live_meta() {
     printf 'window=%s:%s\n' "$SESSION" "$name"
     printf 'cwd=%s\n' "$cwd"
     printf 'agent=%s\n' "$agent"
-    [[ -n "$model"   ]] && printf 'model=%s\n' "$model"
-    [[ -n "$persona" ]] && printf 'persona=%s\n' "$persona"
+    [[ -n "$model"   ]] && printf 'model=%s\n' "$model" || true
+    [[ -n "$persona" ]] && printf 'persona=%s\n' "$persona" || true
   } > "$meta_file"
 }
 
@@ -174,13 +183,18 @@ cmd_live_open() {
   local agent_cmd
   agent_cmd="$(build_agent_cmd "$agent" "$cwd" "$model" "$persona" "$full_auto")"
 
-  # Enable pipe-pane logging so output is captured for watch
+  # The agent is launched directly as the window command so it owns the pty:
+  # interactive TUI agents detect a non-tty stdout and either refuse to start
+  # or render broken, so the old `... | tee` pipe killed them. tmux pipe-pane
+  # mirrors the pane content into the log for `endy watch` without touching
+  # the agent's terminal.
   local log_file="${LOG_DIR}/live-${name}.log"
   mkdir -p "$LOG_DIR"
 
   tmux new-window -t "$SESSION" -n "$name" -c "$cwd" \
-    "bash -lc $(printf '%q' "${agent_cmd} 2>&1 | tee ${log_file}")"
+    "bash -lc $(printf '%q' "$agent_cmd")"
   tmux set-window-option -t "${SESSION}:${name}" remain-on-exit on 2>/dev/null || true
+  tmux pipe-pane -o -t "${SESSION}:${name}" "cat >> $(printf '%q' "$log_file")" 2>/dev/null || true
 
   write_live_meta "$name" "$cwd" "$agent" "$model" "$persona"
 
@@ -276,7 +290,7 @@ cmd_live_list() {
   require_session
 
   # System window name prefixes to exclude
-  local system_prefixes="orchestrator watch docs tree help opencode logs panel task- chat- follow-"
+  local system_prefixes="orchestrator watch browse docs tree sessions agents help opencode logs panel task- chat- follow-"
 
   local excluded_pattern=""
   for pfx in $system_prefixes; do
@@ -293,8 +307,8 @@ cmd_live_list() {
     local agent="?" cwd="?"
 
     if [[ -f "$meta_file" ]]; then
-      agent="$(grep '^agent=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2-)"
-      cwd="$(grep '^cwd=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2-)"
+      agent="$(grep '^agent=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+      cwd="$(grep '^cwd=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2- || true)"
     fi
 
     agent="${agent:-?}"
@@ -330,10 +344,10 @@ cmd_live_status() {
   local m
   for m in "${LOG_DIR}"/live-*.meta; do
     local name; name="$(basename "$m" .meta | sed 's/^live-//')"
-    local agent; agent="$(grep '^agent=' "$m" 2>/dev/null | head -1 | cut -d= -f2-)"
-    local cwd;   cwd="$(grep '^cwd=' "$m" 2>/dev/null | head -1 | cut -d= -f2-)"
-    local persona; persona="$(grep '^persona=' "$m" 2>/dev/null | head -1 | cut -d= -f2-)"
-    local model; model="$(grep '^model=' "$m" 2>/dev/null | head -1 | cut -d= -f2-)"
+    local agent; agent="$(grep '^agent=' "$m" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    local cwd;   cwd="$(grep '^cwd=' "$m" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    local persona; persona="$(grep '^persona=' "$m" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    local model; model="$(grep '^model=' "$m" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 
     agent="${agent:-?}"
     cwd="${cwd:-?}"
@@ -363,9 +377,10 @@ cmd_live_status() {
     local pane_content
     pane_content="$(tmux capture-pane -t "$target" -p -S -20 2>/dev/null || true)"
 
-    # Detect prompt: lines ending with common agent prompt patterns
+    # Detect prompt: a line that is (mostly) just an agent prompt marker,
+    # i.e. the agent is waiting for input rather than mid-output.
     local has_prompt=0
-    if echo "$pane_content" | grep -qE '(> |codex>|➜|❯|$)'; then
+    if printf '%s\n' "$pane_content" | grep -qE '(^|[[:space:]])(>|❯|➜|codex>)[[:space:]]*$'; then
       has_prompt=1
     fi
 
