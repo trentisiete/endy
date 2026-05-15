@@ -24,7 +24,7 @@ _endy_complete() {
   fi
 
   local subs="install start stop status doctor orchestrator tmux-help \
-              watch web spawn ask chat help \
+              watch web spawn ask chat handoff help \
               codex opencode cmd commandcode hermes claude"
 
   local agents="codex opencode cmd hermes claude"
@@ -33,6 +33,7 @@ _endy_complete() {
   local web_opts="--localhost --host --port --token"
   local spawn_opts="--full-auto --supervised --persona --model --cwd --max-turns --orchestrator --orchestrator-agent --parent-task --resume --skills --"
   local chat_opts="--persona --model --cwd --resume --parent-task --orchestrator --orchestrator-agent --full-auto --no-select"
+  local handoff_opts="--to --reason --instructions --lines --no-attach --stop-parent"
 
   # First positional: the subcommand.
   if [[ "$cword" -eq 1 ]]; then
@@ -57,6 +58,25 @@ _endy_complete() {
       else
         COMPREPLY=( $(compgen -W "$chat_opts" -- "$cur") )
       fi
+      return 0
+      ;;
+    handoff)
+      # First positional after `handoff` is a task id prefix.
+      case "$prev" in
+        --to)            COMPREPLY=( $(compgen -W "$agents" -- "$cur") ); return 0 ;;
+        --reason|--instructions|--lines) COMPREPLY=(); return 0 ;;
+      esac
+      if [[ "$cword" -eq 2 ]]; then
+        local logs_dir="${ENDY_LOGS_DIR:-$HOME/Downloads/endy/.logs}"
+        if [[ -d "$logs_dir" ]]; then
+          local ids
+          ids="$(ls -1 "$logs_dir"/task-*.meta 2>/dev/null \
+                 | sed -E 's|.*/task-([0-9]+-[0-9]+-[0-9a-f]+)\.meta|\1|')"
+          COMPREPLY=( $(compgen -W "$ids" -- "$cur") )
+        fi
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "$handoff_opts" -- "$cur") )
       return 0
       ;;
     watch)

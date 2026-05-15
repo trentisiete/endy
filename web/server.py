@@ -290,6 +290,9 @@ def list_tasks() -> list:
                 "spawned_at": meta_data.get("spawned_at", ""),
                 "parent_task": meta_data.get("parent_task", ""),
                 "resume_id": meta_data.get("resume_id", ""),
+                "handoff_from": meta_data.get("handoff_from", ""),
+                "handoff_chain": meta_data.get("handoff_chain", ""),
+                "handoff_reason": meta_data.get("handoff_reason", ""),
                 "session": session_for_meta(meta),
                 "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
                 "status": task_status(log_path, meta_data),
@@ -329,6 +332,9 @@ def task_detail(tid: str) -> dict | None:
         "spawned_at": meta_data.get("spawned_at", ""),
         "parent_task": meta_data.get("parent_task", ""),
         "resume_id": meta_data.get("resume_id", ""),
+        "handoff_from": meta_data.get("handoff_from", ""),
+        "handoff_chain": meta_data.get("handoff_chain", ""),
+        "handoff_reason": meta_data.get("handoff_reason", ""),
         "window": meta_data.get("window", ""),
         "session": session_for_meta(meta_path),
         "runtime_s": runtime_seconds(meta_data.get("spawned_at", "")),
@@ -499,7 +505,7 @@ def stream_events(handler):
         while True:
             tasks = list_tasks()
             # Only re-send when something changed.
-            sig = tuple((t["task_id"], t["status"], t["last"], t.get("parent_task", ""), t.get("orchestrator", "")) for t in tasks)
+            sig = tuple((t["task_id"], t["status"], t["last"], t.get("parent_task", ""), t.get("orchestrator", ""), t.get("handoff_from", "")) for t in tasks)
             if sig != last_signature:
                 if not write(json.dumps(tasks), event="tasks"):
                     return

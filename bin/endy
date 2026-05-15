@@ -37,6 +37,15 @@
 #                                              prompts (full agent loop). Prefer 'ask cmd' or
 #                                              wrap in bash -c for shell commands.
 #   endy chat <agent> [opts]                   Interactive agent in a tmux window.
+#   endy handoff <id> --to <agent> [opts]      Hand a running/exhausted task over to a
+#                                              different agent. The new agent inherits cwd,
+#                                              orchestrator, the original prompt, and the
+#                                              tail of the previous agent's output.
+#                                              agents: opencode, cmd, claude, hermes, gemini,
+#                                                      bash (offline stub for testing).
+#                                              opts: --reason "<text>", --instructions "<text>",
+#                                                    --lines N (default 80), --stop-parent,
+#                                                    --no-attach.
 #
 # Watching
 #   endy watch                        Read-only attach to the tmux session.
@@ -157,23 +166,25 @@ show_help() {
   sed -n '2,62p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# Extract the per-agent gotcha section from README.md so users don't have to
-# context-switch to the file. The README's "Per-CLI gotchas" section uses
-# `### <agent>` headings — we slice between one heading and the next `###`.
+# Extract the per-agent gotcha section from docs/cli-gotchas.md so users
+# don't have to context-switch to the file. The doc's per-CLI sections use
+# `### <agent>` headings — we slice between one heading and the next `###`
+# or `---`.
 show_agent_help() {
   local agent="$1"
-  local readme="${ENDY_ROOT}/README.md"
-  [[ -f "$readme" ]] || die "README.md not found at $readme"
+  local doc="${ENDY_ROOT}/docs/cli-gotchas.md"
+  [[ -f "$doc" ]] || die "docs/cli-gotchas.md not found at $doc"
 
-  # Map endy agent name → README heading prefix (literal substring match)
   local heading
   case "$agent" in
     opencode)        heading='### opencode' ;;
     cmd|commandcode) heading='### cmd' ;;
     hermes)          heading='### hermes' ;;
     claude)          heading='### claude' ;;
+    gemini)          heading='### gemini' ;;
+    bash|stub)       heading='### bash' ;;
     tmux)            heading='### tmux specifics' ;;
-    *) die "no help page for agent '$agent' — try: opencode, cmd, hermes, claude, tmux" ;;
+    *) die "no help page for agent '$agent' — try: opencode, cmd, hermes, claude, gemini, bash, tmux" ;;
   esac
 
   awk -v h="$heading" -v agent_label="$agent" '
@@ -187,7 +198,7 @@ show_agent_help() {
     in_section && /^### / { exit }
     in_section && /^---/  { exit }
     in_section { print }
-  ' "$readme"
+  ' "$doc"
 }
 
 cmd_help() {
@@ -196,15 +207,15 @@ cmd_help() {
     return 0
   fi
   case "$1" in
-    opencode|cmd|commandcode|hermes|claude|tmux) show_agent_help "$1" ;;
+    opencode|cmd|commandcode|hermes|claude|gemini|bash|stub|tmux) show_agent_help "$1" ;;
     -h|--help|help)
       cat <<'EOF'
 endy help                Show top-level usage
 endy help <agent>        Show per-CLI gotchas for an agent
-                         agents: opencode, cmd, hermes, claude, tmux
+                         agents: opencode, cmd, hermes, claude, gemini, bash, tmux
 EOF
       ;;
-    *) echo "endy: no help topic '$1' — try: endy help <opencode|cmd|hermes|claude|tmux>" >&2; exit 2 ;;
+    *) echo "endy: no help topic '$1' — try: endy help <opencode|cmd|hermes|claude|gemini|bash|tmux>" >&2; exit 2 ;;
   esac
 }
 
@@ -337,6 +348,14 @@ cmd_doctor() {
     printf '✓ %s running\n' "$SESSION"
   else
     printf '· %s down (run: endy start)\n' "$SESSION"
+  fi
+  printf 'handoff ......... '
+  if [[ -n "${ENDY_HANDOFF_RESOLVER:-}" ]] && command -v "${ENDY_HANDOFF_RESOLVER%% *}" >/dev/null 2>&1; then
+    printf '✓ resolver: %s\n' "$ENDY_HANDOFF_RESOLVER"
+  elif command -v multiplexor >/dev/null 2>&1; then
+    printf '· multiplexor on PATH (set ENDY_HANDOFF_RESOLVER to auto-route)\n'
+  else
+    printf '· manual only — pass --to <agent> when handing off\n'
   fi
   # Show any other endy* sessions so the user sees the per-dir landscape.
   local other_sessions
@@ -514,6 +533,14 @@ cmd_ask() {
   esac
 }
 
+cmd_handoff() {
+  # Thin wrapper over scripts/handoff.sh. All the real logic — parent meta
+  # lookup, prompt/log harvesting, agent dispatch — lives in the script so
+  # any frontend (web dashboard, codex skill, multiplexor) can call it the
+  # same way.
+  exec "${SCRIPTS}/handoff.sh" "$@"
+}
+
 cmd_chat() {
   local agent="${1:-}"
   [[ -n "$agent" ]] || die "usage: endy chat <agent> [--persona X] [--model X] [--cwd DIR] [--resume ID] [--orchestrator X] [--orchestrator-agent X] [--full-auto] [--no-select]"
@@ -556,6 +583,7 @@ case "${1:-help}" in
   spawn)    shift; cmd_spawn "$@" ;;
   ask)      shift; cmd_ask "$@" ;;
   chat)     shift; cmd_chat "$@" ;;
+  handoff)  shift; cmd_handoff "$@" ;;
   live)     shift; exec "${SCRIPTS}/live.sh" "$@" ;;
 
   codex)    shift; run_agent codex "$@" ;;

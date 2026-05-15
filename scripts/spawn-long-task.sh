@@ -46,6 +46,9 @@ prompt_file=""
 full_auto=0
 resume_id=""
 parent_task=""
+handoff_from=""
+handoff_chain=""
+handoff_reason=""
 orchestrator=""
 orchestrator_agent="${ENDY_ORCHESTRATOR_AGENT:-}"
 origin_cwd="$(pwd)"
@@ -68,8 +71,11 @@ while [[ $# -gt 0 ]]; do
     --prompt-file)  prompt_file="$2";  shift 2 ;;
     --full-auto)    full_auto=1;       shift   ;;
     --max-turns)    max_turns="$2";    shift 2 ;;
-    --resume)       resume_id="$2";    shift 2 ;;
-    --parent-task)  parent_task="$2";  shift 2 ;;
+    --resume)         resume_id="$2";     shift 2 ;;
+    --parent-task)    parent_task="$2";   shift 2 ;;
+    --handoff-from)   handoff_from="$2";  shift 2 ;;
+    --handoff-chain)  handoff_chain="$2"; shift 2 ;;
+    --handoff-reason) handoff_reason="$2"; shift 2 ;;
     --orchestrator) orchestrator="$2"; shift 2 ;;
     --orchestrator-agent) orchestrator_agent="$2"; shift 2 ;;
     --session)      SESSION="$2";      shift 2 ;;
@@ -160,13 +166,29 @@ case "$agent" in
     [[ -n "$max_turns" ]] && cmd_argv+=(--max-turns "$max_turns")
     cmd_argv+=(-q)
     ;;
+  gemini)
+    # Gemini CLI (google-gemini/gemini-cli). Takes the prompt on stdin or
+    # as the last positional. We pass it positionally — same shape as the
+    # other agents. --yolo is gemini's auto-approve flag.
+    cmd_argv=(gemini)
+    [[ -n "$model" ]] && cmd_argv+=(--model "$model")
+    [[ "$full_auto" == "1" ]] && cmd_argv+=(--yolo)
+    cmd_argv+=(-p)
+    ;;
+  bash|stub|noop)
+    # Offline stub agent. Prints the prompt and idles. Useful for smoke-
+    # testing the endy machinery (handoff chain, tree rendering, web
+    # surface) without burning real-agent credits. cmd_argv left empty —
+    # INNER_CMD has a dedicated path for this agent below.
+    cmd_argv=()
+    ;;
   *)
-    echo "unknown --agent: $agent (expected: opencode|cmd|claude|hermes)" >&2; exit 2 ;;
+    echo "unknown --agent: $agent (expected: opencode|cmd|claude|hermes|gemini|bash)" >&2; exit 2 ;;
 esac
 
 # Shell-quote each argv element so spaces, quotes, etc. survive.
 quoted_argv=""
-for a in "${cmd_argv[@]}"; do
+for a in "${cmd_argv[@]+"${cmd_argv[@]}"}"; do
   quoted_argv+=" $(printf '%q' "$a")"
 done
 
@@ -176,7 +198,12 @@ quoted_log_path="$(printf '%q' "$LOG_PATH")"
 # The full shell command run inside the new tmux window. The prompt is
 # substituted by the shell at runtime via $(cat <file>), so the literal
 # command stays small even for 100KB prompts.
-INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}"
+if [[ "$agent" == "bash" || "$agent" == "stub" || "$agent" == "noop" ]]; then
+  # Offline stub: print the prompt + idle. No external command, no API.
+  INNER_CMD="{ printf '[stub agent — prompt follows]\\n'; cat ${quoted_prompt_path}; printf '\\n[stub idle — Ctrl-c to exit, or kill via endy watch kill]\\n'; sleep infinity; } 2>&1 | tee ${quoted_log_path}"
+else
+  INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}"
+fi
 
 WINDOW_NAME="task-${TASK_ID}"
 tmux new-window -t "${SESSION}" -n "${WINDOW_NAME}" -c "${cwd}" "${INNER_CMD}"
@@ -201,6 +228,9 @@ prompt=${PROMPT_PATH}
 spawned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 parent_task=${parent_task}
 resume_id=${resume_id}
+handoff_from=${handoff_from}
+handoff_chain=${handoff_chain}
+handoff_reason=${handoff_reason}
 EOF
 
 cat <<EOF

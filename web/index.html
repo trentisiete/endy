@@ -231,9 +231,18 @@
 
     function taskItem(t) {
       const li = document.createElement("li");
-      li.className = t.parent_task ? "task child" : "task";
+      const isHandoff = !!t.handoff_from;
+      li.className = isHandoff ? "task child handoff" : (t.parent_task ? "task child" : "task");
       li.dataset.id = t.task_id;
-      const parent = t.parent_task ? `<span class="parent">parent ${escapeHtml(shortTaskRef(t.parent_task))}</span>` : "";
+      // Handoff takes visual precedence over plain parent: it tells the
+      // user "this is a continuation from another agent" which matters more
+      // than the spawn hierarchy.
+      let lineage = "";
+      if (isHandoff) {
+        lineage = `<span class="parent" title="handoff source${t.handoff_reason ? ' · ' + t.handoff_reason : ''}">↪ from ${escapeHtml(shortTaskRef(t.handoff_from))}</span>`;
+      } else if (t.parent_task) {
+        lineage = `<span class="parent">parent ${escapeHtml(shortTaskRef(t.parent_task))}</span>`;
+      }
       li.innerHTML = `
         <div class="row1">
           <span class="status ${t.status.split('(')[0]}">${t.status}</span>
@@ -241,7 +250,7 @@
           <span class="agent">${t.agent}</span>
           ${t.model ? `<span class="persona">${escapeHtml(t.model)}</span>` : ""}
           <span class="persona">${t.persona || "ad-hoc"}</span>
-          ${parent}
+          ${lineage}
           <span class="runtime">${fmtRuntime(t.runtime_s)}</span>
         </div>
         <div class="last">${t.last ? escapeHtml(t.last) : "—"}</div>
@@ -314,6 +323,8 @@
       const d = await res.json();
       const win = d.window || `${d.session || 'endy'}:task-${tid}`;
       const shortParent = d.parent_task ? shortTaskRef(d.parent_task) : "";
+      const shortHandoff = d.handoff_from ? shortTaskRef(d.handoff_from) : "";
+      const chainStr = d.handoff_chain ? d.handoff_chain.split(",").map(shortTaskRef).join(" → ") : "";
       $("#log-meta").innerHTML = `
         <div><span class="k">kind</span> <span class="v">${escapeHtml(d.kind || "spawn")}</span></div>
         <div><span class="k">orch</span> <span class="v">${escapeHtml(d.orchestrator_label || d.orchestrator || "manual")}</span></div>
@@ -321,6 +332,8 @@
         ${d.model ? `<div><span class="k">model</span> <span class="v">${escapeHtml(d.model)}</span></div>` : ""}
         <div><span class="k">persona</span> <span class="v">${escapeHtml(d.persona || "ad-hoc")}</span></div>
         ${d.parent_task ? `<div><span class="k">parent</span> <span class="v">${escapeHtml(shortParent)}</span></div>` : ""}
+        ${d.handoff_from ? `<div><span class="k">handoff from</span> <span class="v">↪ ${escapeHtml(shortHandoff)}${d.handoff_reason ? ' · ' + escapeHtml(d.handoff_reason) : ''}</span></div>` : ""}
+        ${chainStr ? `<div><span class="k">chain</span> <span class="v">${escapeHtml(chainStr)} → <b>${escapeHtml(shortTaskRef(tid))}</b></span></div>` : ""}
         <div><span class="k">cwd</span> <span class="v">${escapeHtml(d.cwd || "—")}</span></div>
         <div><span class="k">spawned</span> <span class="v">${escapeHtml(d.spawned_at)}</span></div>
         <div><span class="k">runtime</span> <span class="v">${fmtRuntime(d.runtime_s)}</span></div>
