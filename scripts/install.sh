@@ -45,15 +45,24 @@ TS="$(date +%s)"
 
 # --yes / -y skips the interactive confirmation prompt. Useful for CI,
 # Docker images, and `curl | bash` quickstart flows.
+# --no-multiplexor skips the multiplexor bootstrap (you can install it yourself
+# later or use endy with manual --to on every handoff).
 ASSUME_YES=0
+INSTALL_MULTIPLEXOR=1
 for arg in "$@"; do
   case "$arg" in
     -y|--yes) ASSUME_YES=1 ;;
+    --no-multiplexor) INSTALL_MULTIPLEXOR=0 ;;
     -h|--help)
       cat <<EOF
-endy install [--yes|-y]
-  Symlink endy's agents/skills/AGENTS.md into the live agent dirs and
-  put bin/endy on PATH. Idempotent — safe to re-run.
+endy install [--yes|-y] [--no-multiplexor]
+  Symlink endy's agents/skills/AGENTS.md into the live agent dirs,
+  put bin/endy on PATH, and bootstrap multiplexor (the routing policy
+  endy hands off to). Idempotent — safe to re-run.
+
+Options:
+  --yes, -y            Assume yes for the confirmation prompt.
+  --no-multiplexor     Skip the multiplexor bootstrap step entirely.
 EOF
       exit 0 ;;
     *) printf 'install: unknown arg: %s\n' "$arg" >&2; exit 2 ;;
@@ -122,6 +131,12 @@ Will append/refresh marked endy block in (preserves your existing prefs):
 
 Will modify (with backup):
   ${CODEX_CONFIG}   (append/replace endy v0.1 block)
+
+Will also bootstrap multiplexor (the routing policy for endy handoff):
+  pip install --user multiplexor   (from PyPI or local clone, if not present)
+  multiplexor init                 (creates ~/.config/multiplexor/config.yaml)
+  ENDY_HANDOFF_RESOLVER            (export added to your shell rc)
+  (pass --no-multiplexor to skip)
 
 EOF
 
@@ -411,6 +426,173 @@ fi
 } > "$CODEX_CONFIG"
 rm -f "$TMP"
 ok "Codex MCP block written"
+
+# ----------------------------------------------------------------------------
+# 9. Bootstrap multiplexor — the routing policy endy hands off to.
+# ----------------------------------------------------------------------------
+# Why this lives in endy install: the whole pitch is "never run out of tier".
+# Without a router, endy handoff still works but you have to pass --to every
+# time. Wiring multiplexor here means `endy handoff <id>` (no --to) just works.
+#
+# Strategy (in order of preference):
+#   1. If `multiplexor-next-provider` is already on PATH: nothing to do.
+#   2. Look for a local multiplexor checkout — sibling dir of endy, or the
+#      MULTIPLEXOR_REPO env var. pip install --user -e from there. This is
+#      the developer-friendly path.
+#   3. pip install --user from PyPI / GitHub URL fallback.
+#
+# Then: multiplexor init (no-op if config exists) + add ENDY_HANDOFF_RESOLVER
+# to the user's shell rc as a separate marked block.
+#
+# Soft-fails on every error. multiplexor is optional infra — if pip is missing
+# or offline, the install still finishes and the user gets a clear warning
+# pointing at the manual steps.
+
+if [[ "$INSTALL_MULTIPLEXOR" == "1" ]]; then
+  say "9/9 multiplexor (routing policy for endy handoff) …"
+
+  multiplexor_install_status="skipped"
+  multiplexor_install_reason=""
+
+  # Locate a source for multiplexor. Order: explicit env, sibling dir, GitHub.
+  # The sibling-dir path keeps the developer workflow snappy.
+  MULTIPLEXOR_SRC=""
+  MULTIPLEXOR_REMOTE="git+https://github.com/trentisiete/multiplexor"
+  if [[ -n "${MULTIPLEXOR_REPO:-}" && -f "${MULTIPLEXOR_REPO}/pyproject.toml" ]]; then
+    MULTIPLEXOR_SRC="$MULTIPLEXOR_REPO"
+  elif [[ -f "${ENDY_ROOT}/../multiplexor/pyproject.toml" ]]; then
+    MULTIPLEXOR_SRC="$(cd "${ENDY_ROOT}/../multiplexor" && pwd)"
+  fi
+
+  # Pick an installer. Order of preference:
+  #   1. pipx  — cleanest, isolated env, binaries on PATH automatically.
+  #   2. uv tool install  — modern, fast, same outcome as pipx.
+  #   3. pip --user  — universal fallback.
+  # The first one that works wins; subsequent ones are not tried.
+  INSTALLER=""
+  INSTALLER_KIND=""
+  if command -v pipx >/dev/null 2>&1; then
+    INSTALLER="pipx"; INSTALLER_KIND="pipx"
+  elif command -v uv >/dev/null 2>&1; then
+    INSTALLER="uv"; INSTALLER_KIND="uv"
+  elif command -v pip3 >/dev/null 2>&1; then
+    INSTALLER="$(command -v pip3)"; INSTALLER_KIND="pip"
+  elif command -v pip >/dev/null 2>&1; then
+    INSTALLER="$(command -v pip)"; INSTALLER_KIND="pip"
+  fi
+
+  if command -v multiplexor-next-provider >/dev/null 2>&1; then
+    ok "multiplexor-next-provider already on PATH ($(command -v multiplexor-next-provider))"
+    multiplexor_install_status="already-installed"
+  elif [[ -z "$INSTALLER" ]]; then
+    warn "no installer found (pipx / uv / pip) — skipping multiplexor install"
+    warn "  install one of these, then re-run 'endy install':"
+    warn "    Debian/Ubuntu:  sudo apt install pipx  (or python3-pip)"
+    warn "    macOS:          brew install pipx       (or uv)"
+    warn "    Anywhere:       curl -LsSf https://astral.sh/uv/install.sh | sh"
+    multiplexor_install_reason="no installer (pipx/uv/pip) found"
+  else
+    # Build the install command per installer kind. SOURCE is either a local
+    # directory or a git URL; pipx and uv accept both shapes natively, pip
+    # needs an extra `-e` for the editable-from-local path.
+    SOURCE="${MULTIPLEXOR_SRC:-$MULTIPLEXOR_REMOTE}"
+    SOURCE_KIND="GitHub"; [[ -n "$MULTIPLEXOR_SRC" ]] && SOURCE_KIND="local checkout: $MULTIPLEXOR_SRC"
+    say "  installing multiplexor via $INSTALLER_KIND from $SOURCE_KIND"
+    case "$INSTALLER_KIND" in
+      pipx)
+        # pipx install puts both `multiplexor` and `multiplexor-next-provider`
+        # in ~/.local/bin (or pipx's bin dir, which it ensures is on PATH).
+        if pipx install --force "$SOURCE" 2>/tmp/endy-mxp-pip.log; then
+          ok "multiplexor installed via pipx"
+          multiplexor_install_status="installed-pipx"
+        else
+          warn "pipx install failed — see /tmp/endy-mxp-pip.log"
+          multiplexor_install_reason="pipx install failed"
+        fi
+        ;;
+      uv)
+        # uv tool install is pipx's equivalent in uv. Drops binaries in
+        # ~/.local/bin/ via `uv tool` defaults.
+        if uv tool install --force "$SOURCE" >/tmp/endy-mxp-pip.log 2>&1; then
+          ok "multiplexor installed via uv tool"
+          multiplexor_install_status="installed-uv"
+        else
+          warn "uv tool install failed — see /tmp/endy-mxp-pip.log"
+          multiplexor_install_reason="uv tool install failed"
+        fi
+        ;;
+      pip)
+        # pip needs --user, and -e for editable installs of local dirs.
+        pip_args=(install --user --quiet)
+        [[ -n "$MULTIPLEXOR_SRC" ]] && pip_args+=(-e)
+        if "$INSTALLER" "${pip_args[@]}" "$SOURCE" 2>/tmp/endy-mxp-pip.log; then
+          ok "multiplexor installed via pip --user"
+          multiplexor_install_status="installed-pip"
+        else
+          warn "pip install failed — see /tmp/endy-mxp-pip.log"
+          multiplexor_install_reason="pip install failed"
+        fi
+        ;;
+    esac
+  fi
+
+  # If the install succeeded just now (i.e. the binary was NOT on PATH at the
+  # top of this block but should be after pip --user), re-check PATH. pip
+  # --user puts scripts in ~/.local/bin which we already added to PATH above,
+  # but for the current process we need to hash -r.
+  hash -r 2>/dev/null || true
+
+  if command -v multiplexor >/dev/null 2>&1; then
+    # multiplexor init is idempotent — it's a no-op if the config exists.
+    if multiplexor init 2>/dev/null | grep -qE 'Created|already exists'; then
+      ok "multiplexor config seeded"
+    else
+      # Don't fail just because the first run prints something unexpected.
+      ok "multiplexor init ran"
+    fi
+  fi
+
+  # Set ENDY_HANDOFF_RESOLVER in the user's shell rc as a separate managed
+  # block, regardless of whether the install succeeded — the env var is
+  # harmless when the binary isn't there yet, and the user might install it
+  # later by hand.
+  rc=""
+  case "$(basename "${SHELL:-zsh}")" in
+    zsh)  rc="${HOME}/.zshrc"  ;;
+    bash) rc="${HOME}/.bashrc" ;;
+    *)    rc="" ;;
+  esac
+  if [[ -n "$rc" ]]; then
+    touch "$rc"
+    resolver_begin="# >>> endy ENDY_HANDOFF_RESOLVER (managed by endy install)"
+    resolver_end="# <<< endy ENDY_HANDOFF_RESOLVER"
+    # Strip any prior block then append fresh — same pattern as the PATH block.
+    tmp_rc="$(mktemp)"
+    awk -v b="$resolver_begin" -v e="$resolver_end" '
+      $0 == b { skip=1; next }
+      $0 == e { skip=0; next }
+      !skip   { print }
+    ' "$rc" > "$tmp_rc"
+    {
+      cat "$tmp_rc"
+      printf '\n%s\n' "$resolver_begin"
+      printf 'export ENDY_HANDOFF_RESOLVER="multiplexor-next-provider"\n'
+      printf '%s\n'   "$resolver_end"
+    } > "$rc"
+    rm -f "$tmp_rc"
+    ok "wired ENDY_HANDOFF_RESOLVER in $rc"
+  else
+    warn "unknown shell '${SHELL:-?}' — add this to your shell rc manually:"
+    printf '       export ENDY_HANDOFF_RESOLVER="multiplexor-next-provider"\n' >&2
+  fi
+
+  if [[ -n "$multiplexor_install_reason" ]]; then
+    warn "multiplexor was NOT installed: $multiplexor_install_reason"
+    warn "  endy handoff still works with --to <agent>; install multiplexor later for auto-routing."
+  fi
+else
+  say "9/9 multiplexor … skipped (--no-multiplexor)"
+fi
 
 # ----------------------------------------------------------------------------
 # Done

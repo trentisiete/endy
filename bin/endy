@@ -350,11 +350,29 @@ cmd_doctor() {
   else
     printf '· %s down (run: endy start)\n' "$SESSION"
   fi
+  # Multiplexor + resolver — show distinct lines so the user can tell which
+  # piece is missing when auto-routing isn't working.
+  printf 'multiplexor ..... '
+  if command -v multiplexor >/dev/null 2>&1; then
+    local mxp_ver
+    mxp_ver="$(multiplexor --version 2>/dev/null | head -1)"
+    printf '✓ %s\n' "${mxp_ver:-installed}"
+  else
+    printf '· not installed — run: endy install (or: pip install --user git+https://github.com/trentisiete/multiplexor)\n'
+  fi
+  printf 'next-provider ... '
+  if command -v multiplexor-next-provider >/dev/null 2>&1; then
+    printf '✓ %s\n' "$(command -v multiplexor-next-provider)"
+  else
+    printf '· not on PATH — required for ENDY_HANDOFF_RESOLVER auto-routing\n'
+  fi
   printf 'handoff ......... '
   if [[ -n "${ENDY_HANDOFF_RESOLVER:-}" ]] && command -v "${ENDY_HANDOFF_RESOLVER%% *}" >/dev/null 2>&1; then
-    printf '✓ resolver: %s\n' "$ENDY_HANDOFF_RESOLVER"
-  elif command -v multiplexor >/dev/null 2>&1; then
-    printf '· multiplexor on PATH (set ENDY_HANDOFF_RESOLVER to auto-route)\n'
+    printf '✓ auto via %s\n' "$ENDY_HANDOFF_RESOLVER"
+  elif [[ -n "${ENDY_HANDOFF_RESOLVER:-}" ]]; then
+    printf '! ENDY_HANDOFF_RESOLVER is set to "%s" but not on PATH\n' "$ENDY_HANDOFF_RESOLVER"
+  elif command -v multiplexor-next-provider >/dev/null 2>&1; then
+    printf '· manual only — set: export ENDY_HANDOFF_RESOLVER=multiplexor-next-provider\n'
   else
     printf '· manual only — pass --to <agent> when handing off\n'
   fi
