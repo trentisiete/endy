@@ -161,12 +161,12 @@ BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --noprofile --norc
 
 open_manager_windows() {
   if [[ "$mode" == "overview" ]]; then
-    open_view_window   tree     'endy watch tree - arbol de tareas (todas las sesiones)'   tree --overview --live --all
-    open_view_window   sessions 'endy watch sessions - resumen por sesion'                 sessions
-    open_view_window   agents   'endy watch agents - agentes activos (todas las sesiones)' agents
+    open_view_window   tree  'endy watch tree - arbol de tareas (todas las sesiones)'  tree --overview --live --all
+    open_view_window   list  'endy watch list - detalle por task (todas las sesiones)' list --overview
     open_browse_window --overview --live
   else
-    open_view_window   tree     'endy watch tree - arbol de tareas de esta sesion'         tree --all
+    open_view_window   tree  'endy watch tree - arbol de tareas de esta sesion'        tree --all
+    open_view_window   list  'endy watch list - detalle por task de esta sesion'       list
     open_browse_window
   fi
   open_docs_window

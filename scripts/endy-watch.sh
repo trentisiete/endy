@@ -341,10 +341,12 @@ _endy_detect_pane_agent() {
 
 # Stable color rotation for session blocks. Same name → same color across
 # refreshes, so a session keeps its visual identity. Falls back to no color
-# when the terminal can't render ANSI (NO_COLOR=1 or non-tty).
+# when the caller has no ANSI palette (C_RST unset → NO_COLOR or non-tty
+# decided at script init). We can't probe `-t 1` here because callers invoke
+# us via $(...), which makes stdout a pipe inside the subshell.
 _endy_session_color() {
   local name="$1"
-  [[ -t 1 && -z "${NO_COLOR:-}" ]] || { printf ''; return; }
+  [[ -n "${C_RST:-}" ]] || { printf ''; return; }
   local sum=0 i ch
   for ((i=0; i<${#name}; i++)); do
     ch="${name:i:1}"
@@ -365,9 +367,10 @@ _endy_session_color() {
 #   ○ dim    = idle / pending
 #   ▲ yellow = warn (DONE-ERR / handoff origin)
 #   ✕ red    = dead (FAIL / ABANDONED)
+# Same caveat as _endy_session_color about $(...) hiding the tty.
 _endy_status_bullet() {
   local status="$1"
-  local rst=""; [[ -t 1 && -z "${NO_COLOR:-}" ]] && rst=$'\033[0m'
+  local rst="${C_RST:-}"
   local on=""
   case "$status" in
     RUN|running|live|working|ready)
@@ -615,26 +618,20 @@ cmd_list() {
       --orch|--orchestrator) orch_filter="$2"; shift 2 ;;
       --overview|--all-sessions) AGGREGATE=1; shift ;;
       --live) LIVE_ONLY=1; shift ;;
+      --all|-a) shift ;; # accepted for symmetry with tree; list always shows everything
       *) echo "usage: endy watch list [--cwd <dir>] [--orch <name>] [--overview] [--live]" >&2; exit 2 ;;
     esac
   done
   [[ -n "$cwd_filter" ]] && cwd_filter="$(cd "$cwd_filter" 2>/dev/null && pwd || printf '%s\n' "$cwd_filter")"
 
   local now; now="$(date +%s)"
-  local found=0
-
-  # Header
-  printf '%b%-22s %-9s %-13s %-14s %-9s %-16s %-30s %-7s %s%b\n' \
-    "$C_BOLD$C_CYN" "ID" "STATUS" "PARENT" "ORCH" "AGENT" "MODEL" "CWD" "RUN" "LAST" "$C_RST"
-  printf '%b%-22s %-9s %-13s %-14s %-9s %-16s %-30s %-7s %s%b\n' \
-    "$C_DIM" "──────────────────────" "─────────" "─────────────" "──────────────" "─────────" "────────────────" "──────────────────────────────" "───────" "──────────" "$C_RST"
+  local rows=()
 
   while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
 
     local agent;       agent="$(meta_field "$m" agent)"
-    local persona;     persona="$(meta_field "$m" persona)"; persona="${persona:-—}"
     local cwd;         cwd="$(meta_field "$m" cwd)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
     local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
@@ -644,26 +641,12 @@ cmd_list() {
     local orch;        orch="$(task_orchestrator "$m")"
     local orch_label;  orch_label="$(task_orchestrator_label "$m")"
     local model;       model="$(model_label "$m" "$log" "$agent")"
-    local window;      window="$(meta_field "$m" window)"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
-    found=1
-    local parent_short="—"
-    [[ -n "$parent" ]] && parent_short="$(short_task_ref "$parent")"
-    # If this task came via handoff, prefer showing the handoff source in the
-    # PARENT column (it's almost always more informative than the spawn
-    # parent for a continuation task).
-    [[ -n "$handoff_from" ]] && parent_short="↪$(short_task_ref "$handoff_from")"
 
-    # spawned_iso is ISO-8601 UTC like 2026-05-05T10:18:27Z. Uses _endy_iso_to_epoch (portable).
-    local spawned_epoch
-    spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
-    local runtime
-    if [[ "$spawned_epoch" != "0" ]]; then
-      runtime="$(human_runtime $((now - spawned_epoch)))"
-    else
-      runtime="?"
-    fi
+    local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
+    local runtime="?"
+    [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
 
     local status; status="$(log_status "$log" "$id" "$kind")"
 
@@ -671,45 +654,91 @@ cmd_list() {
     if [[ "$kind" == "chat" ]]; then
       last="(interactive pane captured)"
     elif [[ -f "$log" ]]; then
-      # Show the last meaningful line: skip blank lines and the ENDY_EXIT
-      # marker so the column reflects what the agent actually said last.
       last="$(grep -vE '^(ENDY_EXIT=|\[endy-watch\]|[[:space:]]*$)' "$log" 2>/dev/null \
               | tail -n 200 | strip_ansi | tr -d '\r' \
               | awk '/[[:alnum:]]/ { line=$0 } END { print line }' \
-              | head -c 80)"
+              | head -c 90)"
       [[ -z "$last" ]] && last="(empty)"
     else
       last="(no log yet)"
     fi
 
-    # Truncate cwd to fit
-    local cwd_short
-    if [[ ${#cwd} -gt 30 ]]; then
-      cwd_short="…${cwd: -29}"
-    else
-      cwd_short="$cwd"
-    fi
-
-    local sc; sc="$(status_color "$status")"
-    printf '%b%-22s%b %b%-9s%b %-13s %b%-14s%b %b%-9s%b %-16s %-30s %-7s %s\n' \
-      "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$parent_short" \
-      "$C_MAG" "$orch_label" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$cwd_short" "$runtime" "$last"
-    # Handoff badge: explicit one-liner under the row when this task is the
-    # continuation of another. Keeps the table aligned and surfaces the
-    # reason without forcing a wider table.
-    if [[ -n "$handoff_from" ]]; then
-      printf '  %b↪ handoff from %s%b%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
-        "${handoff_reason:+  ${C_DIM}·${C_RST} ${handoff_reason}}"
-    fi
+    # Bash `read` collapses consecutive tabs when IFS is a single whitespace
+    # char, so empty fields would shift the row. Use a sentinel for emptiness
+    # and strip it back to "" after the read.
+    rows+=("${orch_label:-—}"$'\t'"${id:-—}"$'\t'"${status:-—}"$'\t'"${agent:-—}"$'\t'"${model:-—}"$'\t'"${kind:-—}"$'\t'"${parent:-—}"$'\t'"${handoff_from:-—}"$'\t'"${handoff_reason:-—}"$'\t'"${runtime:-—}"$'\t'"${cwd:-—}"$'\t'"${last:-—}")
   done < <(_iter_meta_files)
 
-  if [[ "$found" == "0" ]]; then
+  if [[ "${#rows[@]}" -eq 0 ]]; then
     if [[ "$AGGREGATE" == "1" ]]; then
-      echo "(no tasks across all sessions)"
+      printf '\n  %s(no tasks across all sessions)%s\n' "${C_DIM:-}" "${C_RST:-}"
+      printf '  %sspawn one with: endy spawn <agent> -- "<prompt>"%s\n\n' "${C_DIM:-}" "${C_RST:-}"
     else
-      echo "(no tasks in ${LOG_DIR})"
+      printf '\n  %s(no tasks in this session)%s\n' "${C_DIM:-}" "${C_RST:-}"
+      printf '  %s%s%s\n' "${C_DIM:-}" "${LOG_DIR}" "${C_RST:-}"
+      printf '  %sspawn one with: endy spawn <agent> -- "<prompt>"%s\n\n' "${C_DIM:-}" "${C_RST:-}"
     fi
+    return 0
   fi
+
+  # Group by orchestrator label, then sort by status priority within.
+  local sorted=()
+  while IFS= read -r line; do sorted+=("$line"); done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3)
+
+  local prev_orch=""
+  local sess_color=""
+  local sess_count=0
+  for row in "${sorted[@]}"; do
+    IFS=$'\t' read -r orch_label id status agent model kind parent handoff_from handoff_reason runtime cwd last <<< "$row"
+    # Strip the sentinel back to "" so downstream checks (`-n`, `!= "—"`)
+    # behave as the original meta intended.
+    [[ "$orch_label"     == "—" ]] && orch_label=""
+    [[ "$id"             == "—" ]] && id=""
+    [[ "$status"         == "—" ]] && status=""
+    [[ "$agent"          == "—" ]] && agent=""
+    [[ "$model"          == "—" ]] && model=""
+    [[ "$kind"           == "—" ]] && kind=""
+    [[ "$parent"         == "—" ]] && parent=""
+    [[ "$handoff_from"   == "—" ]] && handoff_from=""
+    [[ "$handoff_reason" == "—" ]] && handoff_reason=""
+    [[ "$runtime"        == "—" ]] && runtime=""
+    [[ "$cwd"            == "—" ]] && cwd=""
+    [[ "$last"           == "—" ]] && last=""
+
+    if [[ "$orch_label" != "$prev_orch" ]]; then
+      [[ -n "$prev_orch" ]] && printf '\n'
+      sess_color="$(_endy_session_color "$orch_label")"
+      printf '%s▎%s %s%s%s%s\n' \
+        "$sess_color" "$C_RST" \
+        "$C_BOLD" "$sess_color" "$orch_label" "$C_RST"
+      printf '  %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..78})" "$C_RST"
+      prev_orch="$orch_label"
+    fi
+
+    local status_str; status_str="$(printf '%s' "$status" | strip_ansi)"
+    local bullet; bullet="$(_endy_status_bullet "$status_str")"
+    printf '   %s  %s%s%s  %s%-9s%s  %s%-9s%s  %s%-7s%s  %s%s%s\n' \
+      "$bullet" \
+      "$C_BOLD" "$id" "$C_RST" \
+      "" "$status_str" "" \
+      "$C_BLU" "$agent" "$C_RST" \
+      "$C_DIM" "$runtime" "$C_RST" \
+      "$C_DIM" "$(printf '%.70s' "$last")" "$C_RST"
+
+    local meta_bits=""
+    [[ "$model" != "—" && -n "$model" ]] && meta_bits+="${model} ${C_DIM}·${C_RST} "
+    [[ "$kind" != "—" && -n "$kind"  && "$kind" != "spawn" ]] && meta_bits+="${kind} ${C_DIM}·${C_RST} "
+    [[ -n "$cwd" ]] && meta_bits+="${cwd}"
+    [[ -n "$meta_bits" ]] && printf '       %s%s%s\n' "$C_DIM" "$meta_bits" "$C_RST"
+
+    if [[ -n "$handoff_from" ]]; then
+      printf '       %s↪ handoff from %s%s%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
+        "${handoff_reason:+  ${C_DIM}· ${handoff_reason}${C_RST}}"
+    elif [[ -n "$parent" && "$parent" != "—" ]]; then
+      printf '       %s↺ parent %s%s\n' "$C_DIM" "$(short_task_ref "$parent")" "$C_RST"
+    fi
+  done
+  printf '\n  %sendy watch log <id>   ·   endy watch chat <id>   ·   endy watch followup <id>%s\n\n' "$C_DIM" "$C_RST"
 }
 
 # ---------------------------------------------------------------------------
@@ -766,102 +795,99 @@ cmd_sessions() {
     return 0
   fi
 
-  # Header
-  printf '%s%-28s  %-44s  %s%s%s\n'     "" "SESSION" "TASKS" "$C_DIM" "LIVE PANES" "$C_RST"
-  printf '%s\n' "$(printf '─%.0s' {1..120})"
-
   for entry in "${sessions[@]}"; do
     local session_name="${entry%%$'\t'*}"
     local log_dir="${entry#*$'\t'}"
+    local sess_color; sess_color="$(_endy_session_color "$session_name")"
 
-    # External session: tmux session is alive but no log dir under this endy
-    # (typically a session created by a different endy install — e.g. the npm
-    # @noetiklab/endy package). Show it so it's not invisible.
-    if [[ ! -d "$log_dir" ]]; then
-      local nwin; nwin="$(tmux list-windows -t "$session_name" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
-      printf '%-28s  %s%s%s  %s%s%s\n' \
-        "$session_name" \
-        "$C_DIM" "${nwin} ventanas tmux (sesion externa)" "$C_RST" \
-        "$C_DIM" "—" "$C_RST"
-      printf '  %stmux attach -t %s%s\n\n' "$C_DIM" "$session_name" "$C_RST"
-      continue
+    # Detect every agent currently running in this tmux session by inspecting
+    # the process tree under each pane. Skips overview/manager windows and
+    # plain shells, so the chip line only shows real CLI agents.
+    local -A agent_counts=()
+    local agent_total=0
+    local first_cwd=""
+    while IFS=$'\t' read -r wname wcmd wpath; do
+      [[ -n "$wname" ]] || continue
+      case "$wname" in
+        watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
+        task-*|chat-*|follow-*|diag*) continue ;;
+      esac
+      local detected; detected="$(_endy_detect_pane_agent "${session_name}:${wname}" "$wname" "$wcmd")"
+      [[ "$detected" == "shell" ]] && continue
+      agent_counts[$detected]=$(( ${agent_counts[$detected]:-0} + 1 ))
+      agent_total=$((agent_total + 1))
+      [[ -z "$first_cwd" && -n "$wpath" ]] && first_cwd="$wpath"
+    done < <(tmux list-windows -t "$session_name" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}' 2>/dev/null)
+
+    # Header line: ▎ session_name                                  cwd
+    printf '\n%s▎%s %s%s%-40s%s' \
+      "$sess_color" "$C_RST" \
+      "$C_BOLD" "$sess_color" "$session_name" "$C_RST"
+    if [[ -n "$first_cwd" ]]; then
+      printf '  %s%s%s' "$C_DIM" "$first_cwd" "$C_RST"
+    fi
+    printf '\n  %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..78})" "$C_RST"
+
+    # Agents chip line
+    if [[ "$agent_total" -gt 0 ]]; then
+      local -a chips=()
+      local a count
+      for a in "${!agent_counts[@]}"; do
+        count="${agent_counts[$a]}"
+        if [[ "$count" -eq 1 ]]; then
+          chips+=("${C_BOLD}${a}${C_RST}")
+        else
+          chips+=("${C_BOLD}${a}${C_RST}${C_DIM} ×${count}${C_RST}")
+        fi
+      done
+      local chip_str
+      printf -v chip_str '  %s' "${chips[@]}"
+      printf '   %sagentes%s %s\n' "$C_DIM" "$C_RST" "$chip_str"
+    else
+      printf '   %sagentes%s  %s—  (sin agentes activos)%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
     fi
 
-    # Count tasks by status
-    local run_count=0 pending_count=0 done_count=0 fail_count=0 abandoned_count=0
-    local task_total=0
+    # Tasks: count from .logs/ if a log dir exists for this session
+    if [[ -d "$log_dir" ]]; then
+      local run_count=0 pending_count=0 done_count=0 fail_count=0 abandoned_count=0 task_total=0
+      shopt -s nullglob
+      local m id log kind status
+      for m in "${log_dir}"/task-*.meta; do
+        id="$(basename "$m" .meta | sed 's/^task-//')"
+        log="${log_dir}/task-${id}.log"
+        [[ -f "$log" ]] || log="${log_dir}/chat-${id}.log"
+        kind="$(meta_field "$m" kind 2>/dev/null)"; kind="${kind:-spawn}"
+        status="$(log_status "$log" "$id" "$kind" 2>/dev/null)"
+        case "$status" in
+          RUN)        ((run_count++)) ;;
+          PENDING)    ((pending_count++)) ;;
+          DONE)       ((done_count++)) ;;
+          DONE-ERR)   ((done_count++)) ;;
+          FAIL*)      ((fail_count++)) ;;
+          ABANDONED)  ((abandoned_count++)) ;;
+        esac
+        ((task_total++))
+      done
+      shopt -u nullglob
 
-    shopt -s nullglob
-    local m id log kind status
-    for m in "${log_dir}"/task-*.meta; do
-      id="$(basename "$m" .meta | sed 's/^task-//')"
-      log="${log_dir}/task-${id}.log"
-      [[ -f "$log" ]] || { log="${log_dir}/chat-${id}.log"; }
-      kind="$(meta_field "$m" kind 2>/dev/null)"; kind="${kind:-spawn}"
-      status="$(log_status "$log" "$id" "$kind" 2>/dev/null)"
-
-      case "$status" in
-        RUN)        ((run_count++)) ;;
-        PENDING)    ((pending_count++)) ;;
-        DONE)       ((done_count++)) ;;
-        DONE-ERR)   ((done_count++)) ;;
-        FAIL*)      ((fail_count++)) ;;
-        ABANDONED)  ((abandoned_count++)) ;;
-      esac
-      ((task_total++))
-    done
-    shopt -u nullglob
-
-    # Build task summary
-    local task_parts=()
-    [[ "$task_total" -eq 0 ]] && task_parts+=("${C_DIM}0 tasks${C_RST}")
-    [[ "$run_count" -gt 0 ]] && task_parts+=("${C_GRN}${run_count} RUN${C_RST}")
-    [[ "$pending_count" -gt 0 ]] && task_parts+=("${C_YLW}${pending_count} PENDING${C_RST}")
-    [[ "$done_count" -gt 0 ]] && task_parts+=("${C_DIM}${done_count} DONE${C_RST}")
-    [[ "$fail_count" -gt 0 ]] && task_parts+=("${C_RED}${fail_count} FAIL${C_RST}")
-    [[ "$abandoned_count" -gt 0 ]] && task_parts+=("${C_RED}${abandoned_count} ABANDONED${C_RST}")
-    [[ "$include_all" == "0" && "$task_total" -gt 0 && "$run_count" -eq 0 && "$pending_count" -eq 0 ]] && task_parts=("${C_DIM}${task_total} tasks (all finished)${C_RST}")
-
-    local task_str
-    printf -v task_str '%s, ' "${task_parts[@]}"
-    task_str="${task_str%, }"
-
-    # Find live panes for this session
-    local live_panes=()
-    shopt -s nullglob
-    local lm lname lagent lstatus lname_clean
-    for lm in "${log_dir}"/live-*.meta; do
-      lname_clean="$(basename "$lm" .meta | sed 's/^live-//')"
-      # Check if window exists in session
-      if ! tmux list-windows -t "$session_name" -F '#W' 2>/dev/null | grep -qxF "$lname_clean"; then
-        continue
+      local -a task_parts=()
+      [[ "$run_count"       -gt 0 ]] && task_parts+=("${C_GRN}${run_count} RUN${C_RST}")
+      [[ "$pending_count"   -gt 0 ]] && task_parts+=("${C_YLW}${pending_count} PENDING${C_RST}")
+      [[ "$done_count"      -gt 0 ]] && task_parts+=("${C_DIM}${done_count} DONE${C_RST}")
+      [[ "$fail_count"      -gt 0 ]] && task_parts+=("${C_RED}${fail_count} FAIL${C_RST}")
+      [[ "$abandoned_count" -gt 0 ]] && task_parts+=("${C_RED}${abandoned_count} ABANDONED${C_RST}")
+      if [[ "$task_total" -eq 0 ]]; then
+        printf '   %stasks%s    %s—%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+      else
+        local task_str
+        printf -v task_str '  %s' "${task_parts[@]}"
+        printf '   %stasks%s   %s\n' "$C_DIM" "$C_RST" "$task_str"
       fi
-      lagent="$(grep '^agent=' "$lm" 2>/dev/null | head -1 | cut -d= -f2-)"
-      lagent="${lagent:-?}"
-
-      # Quick status from log freshness
-      local llog="${log_dir}/live-${lname_clean}.log"
-      local lstatus="ready"
-      if [[ -f "$llog" ]]; then
-        local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
-        [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
-      fi
-
-      local lcolor=""
-      case "$lstatus" in working) lcolor="$C_GRN" ;; ready) lcolor="$C_BLU" ;; *) lcolor="$C_DIM" ;; esac
-      live_panes+=("${lcolor}${lname_clean}(${lagent})${C_RST}")
-    done
-    shopt -u nullglob
-
-    local live_str="${C_DIM}—${C_RST}"
-    [[ "${#live_panes[@]}" -gt 0 ]] && printf -v live_str '%s, ' "${live_panes[@]}" && live_str="${live_str%, }"
-
-    printf '%-28s  %-44s  %s\n'       "$session_name"       "$task_str"       "$live_str"
-
-    # Attach hint
-    printf '  %stmux attach -t %s%s\n' "$C_DIM" "$session_name" "$C_RST"
-    printf '\n'
+    else
+      printf '   %stasks%s    %s(log dir external)%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+    fi
   done
+  printf '\n  %stmux attach -t <session>%s\n\n' "$C_DIM" "$C_RST"
 }
 
 # ---------------------------------------------------------------------------
@@ -1023,7 +1049,7 @@ cmd_agents() {
     while IFS=$'\t' read -r wname wcmd wpath wact; do
       [[ -n "$wname" ]] || continue
       case "$wname" in
-        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
+        watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
         task-*|chat-*|follow-*|diag*) continue ;;
       esac
       local key="${tsess}:${wname}"
@@ -1253,7 +1279,7 @@ cmd_tree() {
     while IFS=$'\t' read -r wname wcmd wpath wact; do
       [[ -n "$wname" ]] || continue
       case "$wname" in
-        orchestrator|watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
+        watch|browse|docs|tree|sessions|agents|panel|help|logs|__bootstrap) continue ;;
         task-*|chat-*|follow-*|diag*) continue ;;
       esac
       local key="${tsess}:${wname}"
@@ -1295,36 +1321,59 @@ cmd_tree() {
 
   local last_orch=""
   local last_cwd_key=""
+  local sess_color=""
   printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 -k5,5 | while IFS=$'\t' read -r orch orch_label cwd task_session id status agent model kind parent runtime last handoff_from handoff_reason; do
     if [[ "$orch" != "$last_orch" ]]; then
       [[ -n "$last_orch" ]] && printf '\n'
-      printf '%bORCH%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_MAG$C_BOLD" "$orch_label" "$C_RST"
+      sess_color="$(_endy_session_color "$orch")"
+      printf '%s▎%s %s%s%s%s\n' \
+        "$sess_color" "$C_RST" \
+        "$C_BOLD" "$sess_color" "$orch_label" "$C_RST"
+      printf '  %s%s%s\n' "$C_DIM" "$(printf '─%.0s' {1..78})" "$C_RST"
       last_orch="$orch"
       last_cwd_key=""
     fi
     local cwd_key="${cwd}"$'\t'"${task_session}"
     if [[ "$cwd_key" != "$last_cwd_key" ]]; then
       [[ -n "$last_cwd_key" ]] && printf '\n'
-      printf '  %bDIR%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_CYN" "$cwd" "$C_RST"
-      printf '    %btmux attach -t %s%b    # Ctrl-b w opens the window picker\n' "$C_DIM" "$task_session" "$C_RST"
+      printf '   %s%s%s\n' "$C_DIM" "$cwd" "$C_RST"
       last_cwd_key="$cwd_key"
     fi
-    local sc; sc="$(status_color "$status")"
-    if [[ "$parent" == "—" ]]; then
-      printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s %s\n' \
-        "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$last"
+    local status_str; status_str="$(printf '%s' "$status" | strip_ansi)"
+    local bullet; bullet="$(_endy_status_bullet "$status_str")"
+    local id_short
+    if [[ "$id" == live:* ]]; then
+      id_short="${id#live:}"
+      id_short="${id_short##*:}"
     else
-      printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s parent:%s  %s\n' \
-        "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$(short_task_ref "$parent")" "$last"
+      id_short="$(printf '%s' "$id" | head -c 16)"
     fi
-    # If this task is a handoff continuation, label the relationship visually.
-    # The previous-agent ↪ this-agent arrow is what makes the chain readable
-    # in a single glance.
+    # Build the secondary line only when it carries real info (model, parent,
+    # task id for spawned tasks). For tmux-discovered windows there's no useful
+    # id beyond the agent name itself, so skip the line entirely.
+    local meta_bits=""
+    [[ "$model" != "—" && -n "$model" ]] && meta_bits+="${C_DIM}·${C_RST} ${model} "
+    [[ "$parent" != "—" && -n "$parent" ]] && meta_bits+="${C_DIM}· parent ${C_RST}$(short_task_ref "$parent") "
+    local show_id=""
+    [[ "$kind" != "tmux" && -n "$id_short" ]] && show_id="$id_short"
+
+    printf '   %s  %s%-9s%s  %-9s  %s%-7s%s  %s%s%s\n' \
+      "$bullet" \
+      "$C_BOLD" "$agent" "$C_RST" \
+      "$status_str" \
+      "$C_DIM" "$runtime" "$C_RST" \
+      "$C_DIM" "$(printf '%.70s' "$last")" "$C_RST"
+
+    if [[ -n "$show_id" || -n "$meta_bits" ]]; then
+      printf '       %s%s%s  %s\n' "$C_DIM" "$show_id" "$C_RST" "$meta_bits"
+    fi
     if [[ -n "$handoff_from" ]]; then
-      printf '      %b↪ handoff from %s%b%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
-        "${handoff_reason:+  ${C_DIM}·${C_RST} ${handoff_reason}}"
+      printf '       %s↪ handoff from %s%s%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
+        "${handoff_reason:+  ${C_DIM}· ${handoff_reason}${C_RST}}"
     fi
-    [[ "$agent" == "codex" || "$agent" == "opencode" ]] && _endy_print_agent_stats_line "      " "$agent" "$cwd"
+    if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
+      _endy_print_agent_stats_line "       " "$agent" "$cwd"
+    fi
   done
 }
 
