@@ -1962,6 +1962,14 @@ cmd_browse() {
 
   local rows=()
   local now; now="$(date +%s)"
+
+  # First pass: collect every visible task into parallel maps so we can
+  # later walk the handoff chains (id → ... ) and emit them as `↪` arrows
+  # under their origin. We can't render rows on the fly because chain
+  # order matters: the origin task must come first, then its descendants
+  # in handoff order, regardless of spawn time.
+  local -a IDS=()
+  local -A AGENT_OF PERS_OF CWD_OF SESS_OF STATUS_OF RT_OF FROM_OF HAS_SUCC ROW_OF
   while IFS= read -r m; do
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
@@ -1970,14 +1978,11 @@ cmd_browse() {
     local cwd;         cwd="$(meta_field "$m" cwd)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
     local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
-    local parent;      parent="$(meta_field "$m" parent_task)"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     local orch;        orch="$(task_orchestrator "$m")"
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
-    local spawned_epoch
-    spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
-    local rt="?"
-    [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
+    local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
+    local rt="?"; [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
     local _bw _bs
     _bw="$(meta_field "$m" window 2>/dev/null)"
     _bs="${_bw%%:*}"
@@ -1987,24 +1992,86 @@ cmd_browse() {
       DONE|DONE-ERR|FAIL\(*\)|FAILED\(*\)|ABANDONED)
         [[ "$include_all" == "1" ]] || continue ;;
     esac
+    IDS+=("$id")
+    AGENT_OF[$id]="$agent"
+    PERS_OF[$id]="$persona"
+    CWD_OF[$id]="$cwd"
+    SESS_OF[$id]="$_bs"
+    STATUS_OF[$id]="$st"
+    RT_OF[$id]="$rt"
+    local hf; hf="$(meta_field "$m" handoff_from)"
+    if [[ -n "$hf" ]]; then
+      FROM_OF[$id]="$hf"
+      HAS_SUCC[$hf]=1
+    fi
+  done < <(_iter_meta_files)
 
+  # Build a row string for each id (saved for both direct emission and
+  # chain emission so we don't recompute).
+  local _id
+  for _id in "${IDS[@]}"; do
+    local _agent="${AGENT_OF[$_id]}" _persona="${PERS_OF[$_id]}" _cwd="${CWD_OF[$_id]}"
+    local _bs="${SESS_OF[$_id]}" _st="${STATUS_OF[$_id]}" _rt="${RT_OF[$_id]}"
     local sess_color; sess_color="$(_endy_session_color "$_bs")"
-    local bullet; bullet="$(_endy_status_bullet "$st")"
-    local cwd_short="${cwd:-—}"
+    local bullet; bullet="$(_endy_status_bullet "$_st")"
+    local cwd_short="${_cwd:-—}"
     [[ ${#cwd_short} -gt 36 ]] && cwd_short="…${cwd_short: -35}"
     local pers_chip=""
-    [[ -n "$persona" && "$persona" != "—" && "$persona" != "ad-hoc" ]] && pers_chip="${C_DIM}[$persona]${C_RST}"
+    [[ -n "$_persona" && "$_persona" != "—" && "$_persona" != "ad-hoc" ]] && pers_chip="  ${C_DIM}[$_persona]${C_RST}"
 
-    # Single-line card-style row. Id-first so binds can extract it cheap.
-    rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s' \
-      "$id" \
+    # Column 1 is always a single glyph so fzf's {2} extraction (the id)
+    # stays consistent regardless of whether the row is a chain origin
+    # or a handoff continuation. `·` for origin (visual placeholder),
+    # `↪` cyan for tasks that came from a previous handoff.
+    local link
+    if [[ -n "${FROM_OF[$_id]:-}" ]]; then
+      link="${C_CYN}↪${C_RST}"
+    else
+      link="${C_DIM}·${C_RST}"
+    fi
+    ROW_OF[$_id]="$(printf '%s  %-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s%s' \
+      "$link" "$_id" \
       "$bullet" \
       "$sess_color" "$C_BOLD" "$C_RST" "$_bs" "$C_RST" \
-      "$C_BOLD" "$agent" "$C_RST" \
-      "$C_DIM" "$st" "$C_RST" \
-      "$C_DIM" "$rt" "$C_RST" \
-      "$C_DIM" "$cwd_short" "$C_RST")  ${pers_chip}")
-  done < <(_iter_meta_files)
+      "$C_BOLD" "$_agent" "$C_RST" \
+      "$C_DIM" "$_st" "$C_RST" \
+      "$C_DIM" "$_rt" "$C_RST" \
+      "$C_DIM" "$cwd_short" "$C_RST" "$pers_chip")"
+  done
+
+  # Emit in chain order: each origin (no handoff_from) followed by its
+  # descendants reached via handoff_from links. Standalone tasks (no
+  # chain) come out as themselves.
+  local emitted=" "
+  for _id in "${IDS[@]}"; do
+    [[ "$emitted" == *" $_id "* ]] && continue
+    [[ -n "${FROM_OF[$_id]:-}" ]] && continue   # not an origin
+    rows+=("${ROW_OF[$_id]}")
+    emitted+="$_id "
+    # Walk the chain forward from this origin.
+    local prev="$_id"
+    local found_next=1
+    while [[ "$found_next" == "1" ]]; do
+      found_next=0
+      local cand
+      for cand in "${IDS[@]}"; do
+        if [[ "${FROM_OF[$cand]:-}" == "$prev" && "$emitted" != *" $cand "* ]]; then
+          rows+=("${ROW_OF[$cand]}")
+          emitted+="$cand "
+          prev="$cand"
+          found_next=1
+          break
+        fi
+      done
+    done
+  done
+  # Any orphaned continuation tasks whose origin was filtered out — emit
+  # them on their own so the user can still see them.
+  for _id in "${IDS[@]}"; do
+    [[ "$emitted" == *" $_id "* ]] && continue
+    rows+=("${ROW_OF[$_id]}")
+    emitted+="$_id "
+  done
 
   # --- Live panes ---
   # Each live-*.meta represents a tmux window driven by `endy live open`.
@@ -2045,7 +2112,8 @@ cmd_browse() {
       local lsess_color; lsess_color="$(_endy_session_color "$lsess")"
       local lbullet; lbullet="$(_endy_status_bullet "$lstatus")"
 
-      rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s' \
+      rows+=("$(printf '%s  %-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s' \
+        "${C_DIM}·${C_RST}" \
         "$lid" \
         "$lbullet" \
         "$lsess_color" "$C_BOLD" "$C_RST" "$lsess" "$C_RST" \
@@ -2091,7 +2159,8 @@ cmd_browse() {
     [[ -z "$agents_chip" ]] && agents_chip="—"
     local eid="ext:${tsess}"
     local esess_color; esess_color="$(_endy_session_color "$tsess")"
-    rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-25s%s %s· external%s' \
+    rows+=("$(printf '%s  %-22s  %s  %s%s▎%s %-12s%s %s%-25s%s %s· external%s' \
+      "${C_DIM}·${C_RST}" \
       "$eid" \
       "$(_endy_status_bullet running)" \
       "$esess_color" "$C_BOLD" "$C_RST" "$tsess" "$C_RST" \
@@ -2111,19 +2180,19 @@ cmd_browse() {
   # Build the bind list. ctrl-y copies the id to the system clipboard so the
   # user never has to wrestle with terminal selection.
   local binds=(
-    "--bind=enter:execute(${BASH_SOURCE[0]} _jump {1})+abort"
-    "--bind=ctrl-g:execute(${BASH_SOURCE[0]} _jump {1})+abort"
-    "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {1})"
-    "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {1})"
-    "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {1})+abort"
-    "--bind=ctrl-o:execute-silent(${BASH_SOURCE[0]} chat {1} --no-attach)+refresh-preview"
-    "--bind=ctrl-k:execute(${BASH_SOURCE[0]} kill {1})"
-    "--bind=ctrl-d:execute(${BASH_SOURCE[0]} purge {1} --from-picker)+abort"
+    "--bind=enter:execute(${BASH_SOURCE[0]} _jump {2})+abort"
+    "--bind=ctrl-g:execute(${BASH_SOURCE[0]} _jump {2})+abort"
+    "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {2})"
+    "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {2})"
+    "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {2})+abort"
+    "--bind=ctrl-o:execute-silent(${BASH_SOURCE[0]} chat {2} --no-attach)+refresh-preview"
+    "--bind=ctrl-k:execute(${BASH_SOURCE[0]} kill {2})"
+    "--bind=ctrl-d:execute(${BASH_SOURCE[0]} purge {2} --from-picker)+abort"
     "--bind=ctrl-r:refresh-preview"
   )
   local header
   if [[ -n "$copy_cmd" ]]; then
-    binds+=("--bind=ctrl-y:execute-silent(printf %s {1} | ${copy_cmd})+abort")
+    binds+=("--bind=ctrl-y:execute-silent(printf %s {2} | ${copy_cmd})+abort")
     header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir'
   else
     header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir  (install xclip/clip.exe for copy)'
@@ -2134,14 +2203,15 @@ cmd_browse() {
     | fzf --ansi --reverse \
           --header="$header" \
           --header-first \
-          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {1} 2>&1" \
+          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
           --preview-window=right:55%:wrap \
           --no-mouse \
           "${binds[@]}")"
   [[ -z "$picked" ]] && return 0
 
-  # Strip ANSI from the picked row to extract the id.
-  local picked_id; picked_id="$(printf '%s' "$picked" | strip_ansi | awk '{print $1}')"
+  # Strip ANSI from the picked row to extract the id (column 2 — column 1
+  # is the chain glyph `·` or `↪`).
+  local picked_id; picked_id="$(printf '%s' "$picked" | strip_ansi | awk '{print $2}')"
   [[ -z "$picked_id" ]] && return 0
 }
 
