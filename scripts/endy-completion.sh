@@ -25,11 +25,11 @@ _endy_complete() {
 
   local subs="install start stop status doctor orchestrator tmux-help \
               watch web spawn ask chat handoff help \
-              codex opencode cmd commandcode hermes claude"
+              codex opencode cmd commandcode hermes claude gemini"
 
-  local agents="codex opencode cmd hermes claude"
+  local agents="codex opencode cmd hermes claude gemini"
   local watch_subs="list tree dir log chat attach panel browse follow view followup kill kill-all gc purge delete purge-session"
-  local help_topics="opencode cmd hermes claude tmux"
+  local help_topics="opencode cmd hermes claude gemini tmux"
   local web_opts="--localhost --host --port --token"
   local spawn_opts="--full-auto --supervised --persona --model --cwd --max-turns --orchestrator --orchestrator-agent --parent-task --resume --skills --"
   local chat_opts="--persona --model --cwd --resume --parent-task --orchestrator --orchestrator-agent --full-auto --no-select"

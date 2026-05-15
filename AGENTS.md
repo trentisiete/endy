@@ -12,6 +12,7 @@ Read it once at the start of a session and keep it in mind. Don't quote it back 
 | **OpenCode** (`opencode`) | Fast multi-model worker, default agent "build" runs on big-pickle | Mechanical refactors, test-writing, codemods. Cheap and fast. |
 | **CommandCode** (`cmd`) | "Taste-1" model — purpose-built for code aesthetics | "Does this read well / match the codebase's idioms?" Nothing else is this good for that. |
 | **Hermes** (`hermes`) | Tool-calling-tuned models from Nous Research; rich plugin/MCP/skill ecosystem | Open-ended agentic work, when you want a specific Nous model, or when you want a parallel orchestrator independent of Codex. |
+| **Gemini CLI** (`gemini`) | Google Gemini, generous free daily quota | Free-tier worker. Use for routine refactors, summaries, exploratory work — keep paid agents for the parts that need them. |
 
 ## Delegation primitives
 
@@ -22,6 +23,7 @@ Three ways to hand work off — pick deliberately, the differences matter:
    - `opencode run [--agent <persona>] "<prompt>"`
    - `cmd --skip-onboarding --trust [--yolo] -p "<prompt>"`
    - `hermes chat -Q --accept-hooks [--skills <name>] -q "<prompt>"`
+   - `gemini [--model <m>] [--yolo] -p "<prompt>"`
    The skill `endy-delegate` covers when to use a persona vs ad-hoc inline.
 3. **Long detached runs** — for unsupervised work that may take 5+ minutes and needs full permissions OK:
    - `endy spawn <agent> [--persona <name>] -- "<prompt>"`
@@ -48,6 +50,7 @@ Personas refuse out-of-scope work by design. If a task doesn't fit any persona, 
 - **OpenCode**: `--agent` requires `mode: all` or `mode: primary` in the persona's frontmatter; `mode: subagent` falls back to default. Persona files must declare `permission: { edit/write/bash: allow }` or directory access is auto-rejected.
 - **CommandCode**: no `--model` or `--agent` CLI flag — both are slash-command-only (`/model`, `/agents`). Personas in `~/.commandcode/agents/` only apply via interactive `/agents`. For non-interactive runs, write the role into the prompt. Order matters: `cmd` flags first, then `-p` last, then prompt.
 - **Hermes**: needs `--accept-hooks` for unattended runs. Models are selected via `hermes model` ahead of time, not per-call.
+- **Gemini CLI**: `-p "<prompt>"` for non-interactive prompt; `--yolo` skips approval prompts (mirror of cmd's `--yolo`). Free daily quota — when it 429s with `RESOURCE_EXHAUSTED`, hand off to another agent via `endy handoff <id> --to <other>`.
 - **Codex**: `multi_agent` flag is stable. `child_agents_md` (auto-loading nested AGENTS.md) is under-development as of May 2026 — assume only the global `~/.codex/AGENTS.md` and the project's `<cwd>/AGENTS.md` are read reliably.
 - **Exit codes**: opencode and cmd both sometimes exit 0 on internal errors. `endy watch` uses log heuristics to flag this as `DONE-ERR`.
 
@@ -56,7 +59,7 @@ Personas refuse out-of-scope work by design. If a task doesn't fit any persona, 
 A few endy commands worth knowing — they save time when debugging or onboarding:
 
 - `endy doctor` — checks tmux + every agent CLI + `AGENTS.md` symlinks + the cmd model setting (`~/.commandcode/config.json`). A blank cmd model is a common cause of silent spawn hangs. Also lists every running `endy*` tmux session so you can see the per-dir landscape.
-- `endy help <agent>` — prints the per-CLI gotcha section straight out of `README.md`. Agents: `opencode`, `cmd`, `hermes`, `claude`, `tmux`. Use this before guessing why a flag is being ignored.
+- `endy help <agent>` — prints the per-CLI gotcha section straight out of `README.md`. Agents: `opencode`, `cmd`, `hermes`, `claude`, `gemini`, `tmux`. Use this before guessing why a flag is being ignored.
 - `endy start` (per-directory by default) — spins up a tmux session named `endy-<basename>` (with a 4-hex-char hash suffix on collision/reserved names) scoped to `$cwd`. Logs land in `.logs/per-dir/<session>/`. Tasks spawned from this cwd, or with their meta `cwd` under it, show up in this session's watch picker only.
 - `endy overview` — the GLOBAL aggregator, equivalent to the original single-session behavior. Forces `ENDY_SESSION=endy` and `LOG_DIR=$ENDY_ROOT/.logs`. Watch/list/tree/browse here all support `--overview` to scan every per-dir session in addition to the global one.
 - `endy stop [--all|--session <name>]` — `--all` kills every `endy*` tmux session; `--session` targets a specific one; bare `endy stop` kills the per-dir session for the current cwd.

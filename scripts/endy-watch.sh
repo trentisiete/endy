@@ -923,6 +923,7 @@ cmd_agents() {
         *opencode*|oc-*)         twagent="opencode" ;;
         *cmd-*|*commandcode*)    twagent="cmd" ;;
         *hermes*)                twagent="hermes" ;;
+        *gemini*)                twagent="gemini" ;;
       esac
 
       local twruntime="?"
@@ -1112,6 +1113,7 @@ cmd_tree() {
         *opencode*|oc-*)         twagent="opencode" ;;
         *cmd-*|*commandcode*)    twagent="cmd" ;;
         *hermes*)                twagent="hermes" ;;
+        *gemini*)                twagent="gemini" ;;
       esac
 
       local twruntime="?"
