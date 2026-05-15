@@ -103,7 +103,7 @@ SKILL_HOMES=(
 for entry in "${SKILL_HOMES[@]}"; do
   base="${entry%%:*}"
   label="${entry#*:}"
-  for skill in endy-delegate endy-live; do
+  for skill in endy-delegate endy-live endy-state; do
     target="$base/$skill/SKILL.md"
     [[ -L "$base/$skill" ]] || fail "$base/$skill is not a symlink (CLI=$label)"
     [[ -f "$target" ]]      || fail "$target not reachable (CLI=$label)"

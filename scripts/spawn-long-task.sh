@@ -44,6 +44,7 @@ cwd="$(pwd)"
 prompt=""
 prompt_file=""
 full_auto=0
+no_state=0
 resume_id=""
 parent_task=""
 handoff_from=""
@@ -70,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --prompt)       prompt="$2";       shift 2 ;;
     --prompt-file)  prompt_file="$2";  shift 2 ;;
     --full-auto)    full_auto=1;       shift   ;;
+    --no-state)     no_state=1;        shift   ;;
     --max-turns)    max_turns="$2";    shift 2 ;;
     --resume)         resume_id="$2";     shift 2 ;;
     --parent-task)    parent_task="$2";   shift 2 ;;
@@ -112,11 +114,56 @@ TASK_ID="$(date +%Y%m%d-%H%M%S)-$(_endy_rand_hex4)"
 PROMPT_PATH="${LOG_DIR}/task-${TASK_ID}.prompt.md"
 LOG_PATH="${LOG_DIR}/task-${TASK_ID}.log"
 META_PATH="${LOG_DIR}/task-${TASK_ID}.meta"
+WINDOW_NAME="task-${TASK_ID}"
+
+# Write meta BEFORE the prompt + tmux window. state.py needs to be able to
+# read this task's own meta when it composes the '## endy environment' block
+# we're about to prepend to the prompt — and the handoff chain in lineage is
+# read straight off the handoff_chain= line below.
+cat > "$META_PATH" <<EOF
+task_id=${TASK_ID}
+kind=spawn
+orchestrator=${orchestrator}
+orchestrator_agent=${orchestrator_agent}
+origin_session=${origin_session}
+origin_window=${origin_window}
+origin_pane=${origin_pane}
+origin_cwd=${origin_cwd}
+agent=${agent}
+persona=${persona}
+model=${model}
+cwd=${cwd}
+window=${SESSION}:${WINDOW_NAME}
+log=${LOG_PATH}
+prompt=${PROMPT_PATH}
+spawned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+parent_task=${parent_task}
+resume_id=${resume_id}
+handoff_from=${handoff_from}
+handoff_chain=${handoff_chain}
+handoff_reason=${handoff_reason}
+EOF
+
+# Compose the prompt. Default: prepend a '## endy environment' block so the
+# agent knows which link in the handoff chain it is, what other agents are
+# doing in this session, and which tiers have headroom for the next handoff.
+# Bypass with --no-state — useful for offline stubs in smoke tests or when
+# the caller wants a strictly clean prompt.
+state_block=""
+if [[ "$no_state" != "1" ]]; then
+  state_block="$(python3 "${ENDY_ROOT}/scripts/state.py" --task-id "$TASK_ID" --format prompt 2>/dev/null || true)"
+fi
 
 if [[ -n "$prompt_file" ]]; then
-  cp "$prompt_file" "$PROMPT_PATH"
+  raw_prompt="$(cat "$prompt_file")"
 else
-  printf '%s\n' "$prompt" > "$PROMPT_PATH"
+  raw_prompt="$prompt"
+fi
+
+if [[ -n "$state_block" ]]; then
+  printf '%s\n\n---\n\n%s\n' "$state_block" "$raw_prompt" > "$PROMPT_PATH"
+else
+  printf '%s\n' "$raw_prompt" > "$PROMPT_PATH"
 fi
 
 # Build agent argv (everything EXCEPT the final prompt argument).
@@ -205,33 +252,8 @@ else
   INNER_CMD="{ ${quoted_argv} \"\$(cat ${quoted_prompt_path})\" ; printf '\\nENDY_EXIT=%d\\n' \$? ; } 2>&1 | tee ${quoted_log_path}"
 fi
 
-WINDOW_NAME="task-${TASK_ID}"
 tmux new-window -t "${SESSION}" -n "${WINDOW_NAME}" -c "${cwd}" "${INNER_CMD}"
 tmux set-window-option -t "${SESSION}:${WINDOW_NAME}" remain-on-exit on 2>/dev/null || true
-
-cat > "$META_PATH" <<EOF
-task_id=${TASK_ID}
-kind=spawn
-orchestrator=${orchestrator}
-orchestrator_agent=${orchestrator_agent}
-origin_session=${origin_session}
-origin_window=${origin_window}
-origin_pane=${origin_pane}
-origin_cwd=${origin_cwd}
-agent=${agent}
-persona=${persona}
-model=${model}
-cwd=${cwd}
-window=${SESSION}:${WINDOW_NAME}
-log=${LOG_PATH}
-prompt=${PROMPT_PATH}
-spawned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-parent_task=${parent_task}
-resume_id=${resume_id}
-handoff_from=${handoff_from}
-handoff_chain=${handoff_chain}
-handoff_reason=${handoff_reason}
-EOF
 
 cat <<EOF
 TASK_ID=${TASK_ID}
