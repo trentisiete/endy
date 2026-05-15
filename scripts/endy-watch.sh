@@ -1114,6 +1114,89 @@ cmd_browse() {
       "$relation")")
   done < <(_iter_meta_files)
 
+  # --- Live panes ---
+  # Each live-*.meta represents a tmux window driven by `endy live open`.
+  # Add one picker row per live pane whose tmux window is still alive, with
+  # an id of the form `live:<session>:<name>` so the enter dispatcher can
+  # tell it apart from a task id and jump to the right tmux window.
+  local log_dir
+  while IFS= read -r log_dir; do
+    [[ -d "$log_dir" ]] || continue
+    local lm lname lagent lcwd lpersona lmodel lsess
+    if [[ "$log_dir" == "${ENDY_ROOT}/.logs" ]]; then
+      lsess="endy"
+    else
+      lsess="$(basename "$log_dir")"
+    fi
+    shopt -s nullglob
+    for lm in "${log_dir}"/live-*.meta; do
+      lname="$(basename "$lm" .meta | sed 's/^live-//')"
+      tmux list-windows -t "$lsess" -F '#W' 2>/dev/null | grep -qxF "$lname" || continue
+      lagent="$(meta_field "$lm" agent)"; lagent="${lagent:-?}"
+      lcwd="$(meta_field "$lm" cwd)"; lcwd="${lcwd:-?}"
+      lpersona="$(meta_field "$lm" persona)"; lpersona="${lpersona:-—}"
+      lmodel="$(meta_field "$lm" model)"; lmodel="${lmodel:-—}"
+
+      cwd_matches_filter "$lcwd" "$cwd_filter" || continue
+
+      local lmeta_mtime; lmeta_mtime="$(stat -c %Y "$lm" 2>/dev/null || echo "$now")"
+      local luptime; luptime="$(human_runtime $((now - lmeta_mtime)))"
+      local llog="${log_dir}/live-${lname}.log"
+      local lstatus="ready"
+      if [[ -f "$llog" ]]; then
+        local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
+        [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
+      fi
+      local lcolor
+      case "$lstatus" in working) lcolor="$C_GRN" ;; *) lcolor="$C_BLU" ;; esac
+      local lcwd_short="$lcwd"
+      [[ ${#lcwd_short} -gt 38 ]] && lcwd_short="…${lcwd_short: -37}"
+      local lid="live:${lsess}:${lname}"
+
+      rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s [%s]%s' \
+        "$C_BOLD" "$lid" "$C_RST" \
+        "$lcolor" "$lstatus" "$C_RST" \
+        "$C_GRN" "live" "$C_RST" \
+        "$C_BLU" "$lagent" "$C_RST" \
+        "$lmodel" \
+        "$lpersona" \
+        "$C_DIM" "$luptime" "$C_RST" \
+        "$C_DIM" "$lcwd_short" "$lsess" "$C_RST")")
+    done
+    shopt -u nullglob
+  done < <(_aggregate_log_dirs)
+
+  # --- External tmux sessions ---
+  # Any running tmux session matching ^endy(-|$) that doesn't have a log dir
+  # under THIS ENDY_ROOT (e.g. spawned by the npm @noetiklab/endy install).
+  # One row per external session with id `ext:<session>` so Enter attaches.
+  local known_sessions=()
+  while IFS= read -r log_dir; do
+    local s
+    if [[ "$log_dir" == "${ENDY_ROOT}/.logs" ]]; then s="endy"; else s="$(basename "$log_dir")"; fi
+    known_sessions+=("$s")
+  done < <(_aggregate_log_dirs)
+  local tsess
+  while IFS= read -r tsess; do
+    [[ -n "$tsess" ]] || continue
+    local found=0 ks
+    for ks in "${known_sessions[@]}"; do
+      [[ "$ks" == "$tsess" ]] && { found=1; break; }
+    done
+    [[ "$found" == "1" ]] && continue
+    local nwin; nwin="$(tmux list-windows -t "$tsess" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
+    local eid="ext:${tsess}"
+    rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s%s' \
+      "$C_BOLD" "$eid" "$C_RST" \
+      "$C_GREY" "external" "$C_RST" \
+      "$C_GREY" "—" "$C_RST" \
+      "$C_GREY" "tmux" "$C_RST" \
+      "—" \
+      "—" \
+      "$C_DIM" "—" "$C_RST" \
+      "$C_DIM" "${nwin} ventanas tmux" "$C_RST")")
+  done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
+
   if [[ ${#rows[@]} -eq 0 ]]; then
     if [[ "$include_all" == "1" ]]; then
       echo "(no matching tasks — spawn one with: endy spawn <agent> -- \"<prompt>\")"
@@ -1126,8 +1209,8 @@ cmd_browse() {
   # Build the bind list. ctrl-y copies the id to the system clipboard so the
   # user never has to wrestle with terminal selection.
   local binds=(
-    "--bind=enter:execute(${BASH_SOURCE[0]} chat {1})+abort"
-    "--bind=ctrl-g:execute(${BASH_SOURCE[0]} chat {1})+abort"
+    "--bind=enter:execute(${BASH_SOURCE[0]} _jump {1})+abort"
+    "--bind=ctrl-g:execute(${BASH_SOURCE[0]} _jump {1})+abort"
     "--bind=ctrl-v:execute(${BASH_SOURCE[0]} view {1})"
     "--bind=ctrl-l:execute(${BASH_SOURCE[0]} log {1})"
     "--bind=ctrl-f:execute(${BASH_SOURCE[0]} follow {1})+abort"
@@ -1810,6 +1893,33 @@ cmd_purge() {
 # dispatch
 # ---------------------------------------------------------------------------
 
+cmd_jump() {
+  # Dispatcher for the browse picker enter binding. Routes the row id
+  # to the right tmux action based on its prefix:
+  #   live:<sess>:<name>  → select the tmux window
+  #   ext:<sess>          → attach/switch to that tmux session
+  #   <task-id>           → fall back to chat (existing behavior)
+  local key="${1:-}"
+  [[ -n "$key" ]] || return 0
+  case "$key" in
+    live:*|ext:*)
+      local target="${key#*:}"
+      local sess="${target%%:*}"
+      tmux has-session -t "$sess" 2>/dev/null || { echo "endy watch jump: session '$sess' is not running" >&2; return 1; }
+      if [[ "$target" == *:* ]]; then
+        tmux select-window -t "$target" 2>/dev/null || true
+      fi
+      if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "$target" 2>/dev/null || tmux switch-client -t "$sess"
+      else
+        exec tmux attach -t "$sess"
+      fi
+      ;;
+    *)
+      cmd_chat "$key" ;;
+  esac
+}
+
 case "${1:-attach}" in
   attach|"")     shift || true; cmd_attach "$@" ;;
   list|ls)       shift; cmd_list "$@" ;;
@@ -1822,6 +1932,7 @@ case "${1:-attach}" in
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
   _open)         shift; cmd_open "$@" ;;
+  _jump)         shift; cmd_jump "$@" ;;
   browse)        shift; cmd_browse "$@" ;;
   panel)         shift; cmd_panel "$@" ;;
   followup)      shift; cmd_followup "$@" ;;

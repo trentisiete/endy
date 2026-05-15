@@ -19,6 +19,48 @@ ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ENDY_ROOT}/scripts/lib/session.sh"
 SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
 LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
+
+# Browse picker rows can be of three types — handle the two new ones
+# before falling through to the task-id renderer below.
+case "$ID" in
+  live:*)
+    target="${ID#live:}"          # <session>:<name>
+    sess="${target%%:*}"
+    name="${target#*:}"
+    printf '\n  \033[1;36mLIVE PANE\033[0m  \033[1m%s\033[0m\n\n' "$target"
+    printf '  \033[2mSESSION   \033[0m%s\n' "$sess"
+    printf '  \033[2mWINDOW    \033[0m%s\n' "$name"
+    printf '  \033[2mATTACH    \033[0mtmux attach -t %s\n' "$sess"
+    printf '  \033[2mSELECT    \033[0mtmux select-window -t %s\n\n' "$target"
+    printf '\033[36m──── pane (live tail) ────────────────────────────────────────\033[0m\n'
+    if tmux has-session -t "$sess" 2>/dev/null; then
+      # Stream the pane: capture initial state, then loop short captures so
+      # the preview refreshes as the pane changes.
+      while :; do
+        tmux capture-pane -t "$target" -p -S -40 2>/dev/null || { printf '(pane no longer exists)\n'; exit 0; }
+        sleep 1
+        printf '\033[H\033[2J'
+      done
+    else
+      printf '(session %s is not running)\n' "$sess"
+    fi
+    exit 0
+    ;;
+  ext:*)
+    sess="${ID#ext:}"
+    printf '\n  \033[1;36mEXTERNAL SESSION\033[0m  \033[1m%s\033[0m\n\n' "$sess"
+    if tmux has-session -t "$sess" 2>/dev/null; then
+      printf '  \033[2mATTACH    \033[0mtmux attach -t %s\n' "$sess"
+      printf '  \033[2mNOTA      \033[0mno hay log dir bajo este endy (instalacion externa)\n\n'
+      printf '\033[36m──── ventanas tmux ──────────────────────────────────────────\033[0m\n'
+      tmux list-windows -t "$sess" -F '  #I  #W  #{?window_active,(active),}'
+    else
+      printf '(session no longer running)\n'
+    fi
+    exit 0
+    ;;
+esac
+
 META="${LOG_DIR}/task-${ID}.meta"
 # Fallback: search every per-dir scope if the meta isn't in our default LOG_DIR
 # (preview is invoked by fzf with just an ID; LOG_DIR is whatever scope the
