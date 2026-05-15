@@ -68,6 +68,8 @@ set -u
 ENDY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/session.sh
 . "${ENDY_ROOT}/scripts/lib/session.sh"
+# shellcheck source=lib/worktree.sh
+. "${ENDY_ROOT}/scripts/lib/worktree.sh"
 SESSION="${ENDY_SESSION:-$(_endy_session_name "$(pwd)")}"
 LOG_DIR="${ENDY_LOG_DIR:-$(_endy_log_dir "$SESSION")}"
 
@@ -1718,13 +1720,9 @@ cmd_handoffs() {
     STATUS_OF[$id]="$(log_status "$log" "$id" "$kind" "${SESSION_OF[$id]}")"
   done < <(_iter_meta_files)
 
-  # Header
-  printf '%s▌%s%s endy %s%s›%s %sendy watch handoffs%s  %s· cadenas de handoff por sesión%s\n\n' \
-    "${C_MAG:-}" "$C_RST" \
-    "${C_BOLD}${C_MAG:-}" "$C_RST" \
-    "${C_DIM}${C_MAG:-}" "$C_RST" \
-    "${C_BOLD}${C_CYN:-}" "$C_RST" \
-    "$C_DIM" "$C_RST"
+  # No top-level branded header here — the wrapping bash loop in
+  # open_view_window already prints `▌ endy › <title>`. Adding another
+  # would duplicate it inside the management window.
 
   # Find chain leaves (id with no successor, but with at least one handoff_from
   # somewhere in its lineage).
@@ -2675,6 +2673,7 @@ cmd_purge() {
   local task_count=0
   local windows_to_kill=()
   local files_to_delete=()
+  local worktrees_to_remove=()
   for id in "${purge_set[@]}"; do
     task_count=$((task_count + 1))
     local meta; meta="$(task_meta_path "$id")"
@@ -2733,6 +2732,18 @@ cmd_purge() {
     if [[ "$default_log" != "$log" && -f "$default_log" ]]; then
       echo "    fallback log: ${default_log}"
       files_to_delete+=("$default_log")
+    fi
+
+    # Phase 5: collect worktrees we own (created, not inherited). Inherited
+    # rows are skipped — the parent task that created the worktree is the
+    # owner; cleanup happens when that owner is purged.
+    local wt_dir; wt_dir="$(meta_field "$meta" worktree_dir)"
+    local wt_inherited; wt_inherited="$(meta_field "$meta" worktree_inherited)"
+    if [[ -n "$wt_dir" && -z "$wt_inherited" ]]; then
+      echo "    worktree: ${wt_dir}"
+      worktrees_to_remove+=("$wt_dir")
+    elif [[ -n "$wt_dir" && -n "$wt_inherited" ]]; then
+      echo "    worktree: ${wt_dir}  (inherited — left for owner task to clean up)"
     fi
   done
 
@@ -2806,8 +2817,44 @@ cmd_purge() {
     rm -f "$f" && deleted_count=$((deleted_count + 1))
   done
 
+  # Phase 5: worktree cleanup. Run AFTER kill-window (otherwise git refuses
+  # because the index is "in use") and AFTER file deletion (so meta is
+  # already gone — we already collected wt info above). Only remove
+  # worktrees whose porcelain is clean; leave dirty ones with a hint so
+  # the user can `git worktree remove --force` themselves if they really
+  # want to throw away uncommitted edits.
+  local wt_removed=0
+  local wt_skipped_dirty=0
+  local wt_missing=0
+  # Dedup worktree list — two children sharing an owner would otherwise be
+  # listed twice (shouldn't happen with the inherited= rule, but cheap).
+  local unique_worktrees=()
+  if [[ ${#worktrees_to_remove[@]} -gt 0 ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && unique_worktrees+=("$line")
+    done < <(printf '%s\n' "${worktrees_to_remove[@]}" | sort -u)
+  fi
+  for wt in ${unique_worktrees[@]+"${unique_worktrees[@]}"}; do
+    if [[ ! -d "$wt" ]]; then
+      wt_missing=$((wt_missing + 1))
+      continue
+    fi
+    if _endy_worktree_safe_to_remove "$wt"; then
+      if _endy_worktree_remove "$wt"; then
+        wt_removed=$((wt_removed + 1))
+      fi
+    else
+      wt_skipped_dirty=$((wt_skipped_dirty + 1))
+      echo "  SKIP worktree (uncommitted edits): $wt"
+      echo "       → keep working in it, or to drop edits: git worktree remove --force $wt"
+    fi
+  done
+
   echo ""
   echo "Purge complete: ${task_count} task(s), ${killed_count} window(s) killed, ${deleted_count} file(s) deleted"
+  if [[ ${#unique_worktrees[@]} -gt 0 ]]; then
+    echo "Worktree cleanup: ${wt_removed} removed, ${wt_skipped_dirty} skipped (dirty), ${wt_missing} already gone"
+  fi
 }
 
 # ---------------------------------------------------------------------------
