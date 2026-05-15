@@ -462,7 +462,10 @@ if [[ "$INSTALL_MULTIPLEXOR" == "1" ]]; then
   # down or the user has a custom index.
   MULTIPLEXOR_SRC=""
   MULTIPLEXOR_REMOTE="endy-multiplexor"
-  MULTIPLEXOR_REMOTE_FALLBACK="git+https://github.com/trentisiete/multiplexor"
+  # GitHub URL kept for the very rare case PyPI is unreachable. Not used
+  # automatically right now — users can re-run install with the appropriate
+  # MULTIPLEXOR_REPO env if they're behind a proxy that blocks PyPI.
+  MULTIPLEXOR_REMOTE_FALLBACK="git+https://github.com/trentisiete/multiplexor"  # shellcheck disable=SC2034
   if [[ -n "${MULTIPLEXOR_REPO:-}" && -f "${MULTIPLEXOR_REPO}/pyproject.toml" ]]; then
     MULTIPLEXOR_SRC="$MULTIPLEXOR_REPO"
   elif [[ -f "${ENDY_ROOT}/../multiplexor/pyproject.toml" ]]; then
@@ -498,10 +501,14 @@ if [[ "$INSTALL_MULTIPLEXOR" == "1" ]]; then
     multiplexor_install_reason="no installer (pipx/uv/pip) found"
   else
     # Build the install command per installer kind. SOURCE is either a local
-    # directory or a git URL; pipx and uv accept both shapes natively, pip
-    # needs an extra `-e` for the editable-from-local path.
+    # directory or a PyPI package name; pipx and uv accept both shapes
+    # natively, pip needs an extra `-e` for the editable-from-local path.
     SOURCE="${MULTIPLEXOR_SRC:-$MULTIPLEXOR_REMOTE}"
-    SOURCE_KIND="GitHub"; [[ -n "$MULTIPLEXOR_SRC" ]] && SOURCE_KIND="local checkout: $MULTIPLEXOR_SRC"
+    if [[ -n "$MULTIPLEXOR_SRC" ]]; then
+      SOURCE_KIND="local checkout: $MULTIPLEXOR_SRC"
+    else
+      SOURCE_KIND="PyPI (endy-multiplexor)"
+    fi
     say "  installing multiplexor via $INSTALLER_KIND from $SOURCE_KIND"
     case "$INSTALLER_KIND" in
       pipx)
