@@ -677,21 +677,32 @@ cmd_list_picker() {
     return 0
   fi
 
-  local self="${ENDY_ROOT}/scripts/_endy-list-preview.sh"
-  # Generate preview helper on the fly to avoid shipping another script. The
-  # bindings re-invoke endy itself for log/view/kill — they're idempotent
-  # and the picker reopens after the action.
-  local fzf_header=$' enter  log     ctrl-v  view    ctrl-y  copy id    ctrl-k  kill    esc  exit'
-  local sel
-  sel="$(printf '%s\n' "${picker_lines[@]}" \
-    | fzf --no-sort --reverse --ansi --header="$fzf_header" \
-          --preview-window='right:60%:wrap' \
-          --preview "id=\$(echo {} | awk '{print \$2}'); ENDY_FORCE_COLOR=1 ${ENDY_ROOT}/bin/endy watch peek \$id 2>&1" \
-          --bind "ctrl-y:execute-silent(echo {} | awk '{print \$2}' | tr -d '\n' | (command -v xclip >/dev/null && xclip -selection clipboard) || (command -v wl-copy >/dev/null && wl-copy) || (command -v clip.exe >/dev/null && clip.exe))" \
-          --bind "ctrl-v:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch view \$id | less -R)" \
-          --bind "ctrl-k:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch kill \$id; sleep 1)+reload(${ENDY_ROOT}/bin/endy watch list 2>/dev/null | grep -E '^[● ○▲✕·]' || true)" \
-          --bind "enter:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch log \$id)" \
-          )"
+  # fzf's {N} placeholder hands over field N already stripped of ANSI, which
+  # is much safer than re-parsing {} with awk. Picker lines are
+  # `   ●  <id>  <status>  <agent>  ...`, so {2} is the task id.
+  # Pick a clipboard helper available on the host.
+  local copy_cmd=""
+  if   command -v pbcopy   >/dev/null 2>&1; then copy_cmd="pbcopy"
+  elif command -v wl-copy  >/dev/null 2>&1; then copy_cmd="wl-copy"
+  elif command -v xclip    >/dev/null 2>&1; then copy_cmd="xclip -selection clipboard"
+  elif command -v clip.exe >/dev/null 2>&1; then copy_cmd="clip.exe"
+  fi
+
+  local fzf_header=$' enter\xe2\x80\x82log   ctrl-v\xe2\x80\x82view   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   esc\xe2\x80\x82salir'
+  local binds=(
+    --bind "enter:execute(${ENDY_ROOT}/bin/endy watch log {2})"
+    --bind "ctrl-v:execute(${ENDY_ROOT}/bin/endy watch view {2})"
+    --bind "ctrl-k:execute(${ENDY_ROOT}/bin/endy watch kill {2})+abort"
+  )
+  if [[ -n "$copy_cmd" ]]; then
+    binds+=(--bind "ctrl-y:execute-silent(printf %s {2} | ${copy_cmd})")
+  fi
+
+  printf '%s\n' "${picker_lines[@]}" \
+    | fzf --no-sort --reverse --ansi --header="$fzf_header" --header-first \
+          --preview-window='right:55%:wrap' \
+          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
+          "${binds[@]}" >/dev/null
   return 0
 }
 
@@ -1534,7 +1545,70 @@ cmd_log() {
 
 cmd_peek() {
   local prefix="${1:-}"
-  [[ -n "$prefix" ]] || { echo "usage: endy watch peek <id-prefix>" >&2; exit 2; }
+  [[ -n "$prefix" ]] || { echo "usage: endy watch peek <id-prefix> | live:<session>:<window> | ext:<session>" >&2; exit 2; }
+
+  # Chip width: when invoked from fzf's preview pane (right:55%) the
+  # terminal width is narrow, so a fixed 78 wraps ugly. ENDY_PEEK_WIDTH
+  # lets the caller (fzf/preview) shrink it. Default 60.
+  local _W="${ENDY_PEEK_WIDTH:-60}"
+  local _RULE; _RULE="$(printf '─%.0s' $(seq 1 "$_W"))"
+
+  # Live pane row (from browse): chip arriba + tmux capture del pane.
+  if [[ "$prefix" == live:* ]]; then
+    local payload="${prefix#live:}"
+    local lsess="${payload%%:*}"
+    local lname="${payload#*:}"
+    local lcolor; lcolor="$(_endy_session_color "$lsess")"
+    printf '%s╭%s%s\n' "$lcolor" "$_RULE" "$C_RST"
+    printf '%s│%s %s  %slive:%s%s%s  %s· %s%s\n' \
+      "$lcolor" "$C_RST" \
+      "$(_endy_status_bullet running)" \
+      "$C_BOLD" "$lname" "$C_RST" \
+      "$C_DIM" "$lsess" "$C_RST" "" ""
+    printf '%s╰%s%s\n\n' "$lcolor" "$_RULE" "$C_RST"
+    if tmux has-session -t "$lsess" 2>/dev/null \
+         && tmux list-windows -t "$lsess" -F '#W' 2>/dev/null | grep -qxF "$lname"; then
+      tmux capture-pane -t "${lsess}:${lname}" -p -e -S -200 2>/dev/null \
+        | tail -n 80 | head -c 32768
+    else
+      printf '  %s(window cerrada)%s\n' "$C_DIM" "$C_RST"
+    fi
+    return 0
+  fi
+
+  # External tmux session row: chip + agentes detectados + lista de ventanas.
+  if [[ "$prefix" == ext:* ]]; then
+    local esess="${prefix#ext:}"
+    local ecolor; ecolor="$(_endy_session_color "$esess")"
+    printf '%s╭%s%s\n' "$ecolor" "$_RULE" "$C_RST"
+    printf '%s│%s %s  %s%s%s  %s· external (sin log dir local)%s\n' \
+      "$ecolor" "$C_RST" \
+      "$(_endy_status_bullet running)" \
+      "$C_BOLD" "$esess" "$C_RST" \
+      "$C_DIM" "$C_RST"
+    printf '%s│%s %s· tmux attach -t %s%s\n' "$ecolor" "$C_RST" "$C_DIM" "$esess" "$C_RST"
+    printf '%s╰%s%s\n\n' "$ecolor" "$_RULE" "$C_RST"
+    if tmux has-session -t "$esess" 2>/dev/null; then
+      printf '  %sagentes detectados%s\n' "$C_DIM" "$C_RST"
+      local printed=0
+      while IFS=$'\t' read -r wname wcmd wpath; do
+        [[ -n "$wname" ]] || continue
+        case "$wname" in
+          watch|browse|docs|tree|sessions|agents|panel|help|logs|list|__bootstrap) continue ;;
+          task-*|chat-*|follow-*|diag*) continue ;;
+        esac
+        local twagent; twagent="$(_endy_detect_pane_agent "${esess}:${wname}" "$wname" "$wcmd")"
+        [[ "$twagent" == "shell" ]] && continue
+        printf '   %s  %s%-9s%s   %s%s%s\n' \
+          "$(_endy_status_bullet running)" \
+          "$C_BOLD" "$twagent" "$C_RST" \
+          "$C_DIM" "$wname" "$C_RST"
+        printed=1
+      done < <(tmux list-windows -t "$esess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}' 2>/dev/null)
+      [[ "$printed" == "0" ]] && printf '   %s(no agents detected)%s\n' "$C_DIM" "$C_RST"
+    fi
+    return 0
+  fi
 
   local id; id="$(resolve_id "$prefix")" || return 1
   local meta; meta="$(_meta_for_id "$id")"
@@ -1565,7 +1639,7 @@ cmd_peek() {
   # ── chip arriba: id · status · agent · runtime · cwd ──
   # Estilo de pastilla con bordes redondeados, una sola línea visualmente
   # densa que el ojo capta en un instante.
-  printf '%s╭%s%s\n' "$sess_color" "$(printf '─%.0s' {1..78})" "$C_RST"
+  printf '%s╭%s%s\n' "$sess_color" "$_RULE" "$C_RST"
   printf '%s│%s %s  %s%s%s  %s· %s%s  %s· %s%-9s%s' \
     "$sess_color" "$C_RST" \
     "$bullet" \
@@ -1589,7 +1663,7 @@ cmd_peek() {
     local stats; stats="$(_endy_print_agent_stats_line "│ " "$agent" "$cwd")"
     [[ -n "$stats" ]] && printf '%s%s%s' "$sess_color" "${stats}" "$C_RST"
   fi
-  printf '%s╰%s%s\n' "$sess_color" "$(printf '─%.0s' {1..78})" "$C_RST"
+  printf '%s╰%s%s\n' "$sess_color" "$_RULE" "$C_RST"
 
   # ── body: el TUI vivo del agente si la window existe, si no el log ──
   printf '\n'
@@ -1845,17 +1919,13 @@ cmd_browse() {
     return
   fi
 
-  local preview_script="${ENDY_ROOT}/scripts/_endy-preview.sh"
   local copy_cmd
-  if   command -v pbcopy >/dev/null 2>&1; then copy_cmd="pbcopy"
-  elif command -v wl-copy >/dev/null 2>&1; then copy_cmd="wl-copy"
-  elif command -v xclip   >/dev/null 2>&1; then copy_cmd="xclip -selection clipboard"
+  if   command -v pbcopy   >/dev/null 2>&1; then copy_cmd="pbcopy"
+  elif command -v wl-copy  >/dev/null 2>&1; then copy_cmd="wl-copy"
+  elif command -v xclip    >/dev/null 2>&1; then copy_cmd="xclip -selection clipboard"
+  elif command -v clip.exe >/dev/null 2>&1; then copy_cmd="clip.exe"
   else copy_cmd=""
   fi
-
-  # ANSI palette for the list rows.
-  local C_RST=$'\033[0m' C_DIM=$'\033[2m' C_BOLD=$'\033[1m'
-  local C_BLU=$'\033[34m' C_GRN=$'\033[32m' C_YLW=$'\033[33m' C_RED=$'\033[31m' C_GREY=$'\033[90m'
 
   local rows=()
   local now; now="$(date +%s)"
@@ -1863,21 +1933,18 @@ cmd_browse() {
     local id; id="$(basename "$m" .meta | sed 's/^task-//')"
     local log; log="$(task_log_path "$m" "$id")"
     local agent;       agent="$(meta_field "$m" agent)"
-    local persona;     persona="$(meta_field "$m" persona)"; persona="${persona:-ad-hoc}"
+    local persona;     persona="$(meta_field "$m" persona)"
     local cwd;         cwd="$(meta_field "$m" cwd)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
     local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
     local parent;      parent="$(meta_field "$m" parent_task)"
-    local orch;        orch="$(task_orchestrator "$m")"
-    local orch_label;  orch_label="$(task_orchestrator_label "$m")"
-    local model;       model="$(model_label "$m" "$log" "$agent")"
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
+    local orch;        orch="$(task_orchestrator "$m")"
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local spawned_epoch
     spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local rt="?"
     [[ "$spawned_epoch" != "0" ]] && rt="$(human_runtime $((now - spawned_epoch)))"
-    # log_status liveness probe goes to the task's own tmux session.
     local _bw _bs
     _bw="$(meta_field "$m" window 2>/dev/null)"
     _bs="${_bw%%:*}"
@@ -1888,43 +1955,22 @@ cmd_browse() {
         [[ "$include_all" == "1" ]] || continue ;;
     esac
 
-    local dot_color
-    case "$st" in
-      RUN|PENDING|CHAT) dot_color="$C_BLU" ;;
-      DONE)        dot_color="$C_GRN" ;;
-      DONE-ERR)    dot_color="$C_YLW" ;;
-      FAILED*)     dot_color="$C_RED" ;;
-      *)           dot_color="$C_GREY" ;;
-    esac
+    local sess_color; sess_color="$(_endy_session_color "$_bs")"
+    local bullet; bullet="$(_endy_status_bullet "$st")"
+    local cwd_short="${cwd:-—}"
+    [[ ${#cwd_short} -gt 36 ]] && cwd_short="…${cwd_short: -35}"
+    local pers_chip=""
+    [[ -n "$persona" && "$persona" != "—" && "$persona" != "ad-hoc" ]] && pers_chip="${C_DIM}[$persona]${C_RST}"
 
-    # Truncate cwd
-    local cwd_short
-    if [[ ${#cwd} -gt 38 ]]; then
-      cwd_short="…${cwd: -37}"
-    else
-      cwd_short="$cwd"
-    fi
-
-    local window; window="$(meta_field "$m" window)"
-    local session_label=""
-    if [[ "$AGGREGATE" == "1" ]]; then
-      local browse_session="${window%%:*}"
-      [[ -z "$browse_session" || "$browse_session" == "$window" ]] && browse_session="$SESSION"
-      session_label=" [${browse_session}]"
-    fi
-    local relation=""
-    [[ -n "$parent" ]] && relation=" parent:$(short_task_ref "$parent")"
-
-    rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s%s%s' \
-      "$C_BOLD" "$id" "$C_RST" \
-      "$dot_color" "$st" "$C_RST" \
-      "$C_GRN" "$orch_label" "$C_RST" \
-      "$C_BLU" "$agent" "$C_RST" \
-      "$model" \
-      "$persona" \
+    # Single-line card-style row. Id-first so binds can extract it cheap.
+    rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s' \
+      "$id" \
+      "$bullet" \
+      "$sess_color" "$C_BOLD" "$C_RST" "$_bs" "$C_RST" \
+      "$C_BOLD" "$agent" "$C_RST" \
+      "$C_DIM" "$st" "$C_RST" \
       "$C_DIM" "$rt" "$C_RST" \
-      "$C_DIM" "$cwd_short${session_label}" "$C_RST" \
-      "$relation")")
+      "$C_DIM" "$cwd_short" "$C_RST")  ${pers_chip}")
   done < <(_iter_meta_files)
 
   # --- Live panes ---
@@ -1960,21 +2006,20 @@ cmd_browse() {
         local lmtime; lmtime="$(stat -c %Y "$llog" 2>/dev/null || echo 0)"
         [[ $((now - lmtime)) -lt 10 ]] && lstatus="working"
       fi
-      local lcolor
-      case "$lstatus" in working) lcolor="$C_GRN" ;; *) lcolor="$C_BLU" ;; esac
       local lcwd_short="$lcwd"
-      [[ ${#lcwd_short} -gt 38 ]] && lcwd_short="…${lcwd_short: -37}"
+      [[ ${#lcwd_short} -gt 36 ]] && lcwd_short="…${lcwd_short: -35}"
       local lid="live:${lsess}:${lname}"
+      local lsess_color; lsess_color="$(_endy_session_color "$lsess")"
+      local lbullet; lbullet="$(_endy_status_bullet "$lstatus")"
 
-      rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s [%s]%s' \
-        "$C_BOLD" "$lid" "$C_RST" \
-        "$lcolor" "$lstatus" "$C_RST" \
-        "$C_GRN" "live" "$C_RST" \
-        "$C_BLU" "$lagent" "$C_RST" \
-        "$lmodel" \
-        "$lpersona" \
+      rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-9s%s %s· %-9s%s %s· %-7s%s  %s· %s%s' \
+        "$lid" \
+        "$lbullet" \
+        "$lsess_color" "$C_BOLD" "$C_RST" "$lsess" "$C_RST" \
+        "$C_BOLD" "$lagent" "$C_RST" \
+        "$C_DIM" "live" "$C_RST" \
         "$C_DIM" "$luptime" "$C_RST" \
-        "$C_DIM" "$lcwd_short" "$lsess" "$C_RST")")
+        "$C_DIM" "$lcwd_short" "$C_RST")")
     done
     shopt -u nullglob
   done < <(_aggregate_log_dirs)
@@ -1997,17 +2042,28 @@ cmd_browse() {
       [[ "$ks" == "$tsess" ]] && { found=1; break; }
     done
     [[ "$found" == "1" ]] && continue
-    local nwin; nwin="$(tmux list-windows -t "$tsess" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
+    # Detect agents in the external session by walking process trees.
+    local agents_chip="" twagent
+    while IFS=$'\t' read -r wname wcmd wpath; do
+      [[ -n "$wname" ]] || continue
+      case "$wname" in
+        watch|browse|docs|tree|sessions|agents|panel|help|logs|list|__bootstrap) continue ;;
+        task-*|chat-*|follow-*|diag*) continue ;;
+      esac
+      twagent="$(_endy_detect_pane_agent "${tsess}:${wname}" "$wname" "$wcmd")"
+      [[ "$twagent" == "shell" ]] && continue
+      agents_chip+="${twagent} "
+    done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}' 2>/dev/null)
+    agents_chip="${agents_chip% }"
+    [[ -z "$agents_chip" ]] && agents_chip="—"
     local eid="ext:${tsess}"
-    rows+=("$(printf '%s%-22s%s  %s● %-9s%s  %s%-12s%s  %s%-9s%s  %-16s  %-14s  %s%-7s%s  %s%s%s' \
-      "$C_BOLD" "$eid" "$C_RST" \
-      "$C_GREY" "external" "$C_RST" \
-      "$C_GREY" "—" "$C_RST" \
-      "$C_GREY" "tmux" "$C_RST" \
-      "—" \
-      "—" \
-      "$C_DIM" "—" "$C_RST" \
-      "$C_DIM" "${nwin} ventanas tmux" "$C_RST")")
+    local esess_color; esess_color="$(_endy_session_color "$tsess")"
+    rows+=("$(printf '%-22s  %s  %s%s▎%s %-12s%s %s%-25s%s %s· external%s' \
+      "$eid" \
+      "$(_endy_status_bullet running)" \
+      "$esess_color" "$C_BOLD" "$C_RST" "$tsess" "$C_RST" \
+      "$C_BOLD" "$agents_chip" "$C_RST" \
+      "$C_DIM" "$C_RST")")
   done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
 
   if [[ ${#rows[@]} -eq 0 ]]; then
@@ -2035,9 +2091,9 @@ cmd_browse() {
   local header
   if [[ -n "$copy_cmd" ]]; then
     binds+=("--bind=ctrl-y:execute-silent(printf %s {1} | ${copy_cmd})+abort")
-    header="enter→chat fg+exit  Ctrl-O chat bg  Ctrl-G chat fg+exit  Ctrl-F follow  Ctrl-V view  Ctrl-L log  Ctrl-Y copy id  Ctrl-K kill  Ctrl-D purge  Ctrl-R refresh  esc cancel"
+    header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir'
   else
-    header="enter→chat fg+exit  Ctrl-O chat bg  Ctrl-G chat fg+exit  Ctrl-F follow  Ctrl-V view  Ctrl-L log  Ctrl-K kill  Ctrl-D purge  Ctrl-R refresh  esc cancel  (install pbcopy/xclip for Ctrl-Y copy)"
+    header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir  (install xclip/clip.exe for copy)'
   fi
 
   local picked
@@ -2045,8 +2101,8 @@ cmd_browse() {
     | fzf --ansi --reverse \
           --header="$header" \
           --header-first \
-          --preview="${preview_script} {1}" \
-          --preview-window=right:30%:wrap:follow \
+          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {1} 2>&1" \
+          --preview-window=right:55%:wrap \
           --no-mouse \
           "${binds[@]}")"
   [[ -z "$picked" ]] && return 0
