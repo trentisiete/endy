@@ -705,7 +705,12 @@ cmd_list_picker() {
   elif command -v clip.exe >/dev/null 2>&1; then copy_cmd="clip.exe"
   fi
 
-  local fzf_header=$' enter\xe2\x80\x82tmux pane   ctrl-l\xe2\x80\x82log   ctrl-v\xe2\x80\x82view   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   ctrl-x\xe2\x80\x82clean abandoned   esc\xe2\x80\x82salir'
+  # Two lines so every key fits regardless of preview width. fzf renders
+  # \n inside header verbatim.
+  local fzf_header
+  printf -v fzf_header ' %s   %s   %s\n %s   %s   %s   %s' \
+    'enter→tmux pane' 'ctrl-l→log'   'ctrl-v→view' \
+    'ctrl-y→copy id' 'ctrl-k→kill'  'ctrl-x→clean abandoned' 'esc→salir'
   local binds=(
     --bind "enter:execute(${ENDY_ROOT}/bin/endy watch attach {2})+abort"
     --bind "ctrl-l:execute(${ENDY_ROOT}/bin/endy watch log {2})"
@@ -719,8 +724,9 @@ cmd_list_picker() {
 
   printf '%s\n' "${picker_lines[@]}" \
     | fzf --no-sort --reverse --ansi --header="$fzf_header" --header-first \
-          --preview-window='right:55%:wrap' \
-          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
+          --header-lines=0 \
+          --preview-window='right:50%:wrap' \
+          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=50 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
           "${binds[@]}" >/dev/null
   return 0
 }
@@ -1708,17 +1714,22 @@ cmd_peek() {
   printf '\n%s── output del agente ──%s\n\n' "$C_DIM" "$C_RST"
 
   # ── body: el TUI vivo si la window existe, si no el log filtrado ──
+  # `tmux capture-pane -e` preserva los códigos ANSI del propio CLI del
+  # agente, así que lo que verás aquí es literalmente su chat: prompts,
+  # respuestas, indicadores, todo con sus colores. Capturamos el buffer
+  # entero (-S -) y dejamos que el preview window lo scrollee.
   local target="${task_session}:${task_window}"
   if tmux has-session -t "$task_session" 2>/dev/null \
        && tmux list-windows -t "$task_session" -F '#W' 2>/dev/null \
             | grep -qxF "$task_window"; then
-    tmux capture-pane -t "$target" -p -e -S -200 2>/dev/null \
+    tmux capture-pane -t "$target" -p -e -S - 2>/dev/null \
       | _endy_strip_env_block \
-      | tail -n 60 \
-      | head -c 32768
+      | tail -n 200 \
+      | head -c 65536
   elif [[ -f "$log" ]]; then
+    printf '  %s(window cerrada — mostrando log)%s\n\n' "$C_DIM" "$C_RST"
     grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
-      | _endy_strip_env_block | tail -n 60 | tr -d '\r'
+      | _endy_strip_env_block | tail -n 200 | tr -d '\r'
   else
     printf '  %s(no window, no log)%s\n' "$C_DIM" "$C_RST"
   fi
@@ -2193,9 +2204,13 @@ cmd_browse() {
   local header
   if [[ -n "$copy_cmd" ]]; then
     binds+=("--bind=ctrl-y:execute-silent(printf %s {2} | ${copy_cmd})+abort")
-    header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir'
+    printf -v header ' %s   %s   %s   %s\n %s   %s   %s   %s   %s' \
+      'enter→chat'    'ctrl-o→chat bg' 'ctrl-f→follow'  'ctrl-v→view' \
+      'ctrl-l→log'    'ctrl-y→copy id' 'ctrl-k→kill'    'ctrl-d→purge'   'esc→salir'
   else
-    header=$' enter\xe2\x80\x82chat   ctrl-o\xe2\x80\x82chat bg   ctrl-f\xe2\x80\x82follow   ctrl-v\xe2\x80\x82view   ctrl-l\xe2\x80\x82log   ctrl-k\xe2\x80\x82kill   ctrl-d\xe2\x80\x82purge   esc\xe2\x80\x82salir  (install xclip/clip.exe for copy)'
+    printf -v header ' %s   %s   %s   %s\n %s   %s   %s   %s' \
+      'enter→chat'    'ctrl-o→chat bg' 'ctrl-f→follow'  'ctrl-v→view' \
+      'ctrl-l→log'    'ctrl-k→kill'    'ctrl-d→purge'   'esc→salir   (install xclip/clip.exe for copy)'
   fi
 
   local picked
@@ -2203,8 +2218,8 @@ cmd_browse() {
     | fzf --ansi --reverse \
           --header="$header" \
           --header-first \
-          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=55 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
-          --preview-window=right:55%:wrap \
+          --preview "ENDY_FORCE_COLOR=1 ENDY_PEEK_WIDTH=50 ${ENDY_ROOT}/bin/endy watch peek {2} 2>&1" \
+          --preview-window=right:50%:wrap \
           --no-mouse \
           "${binds[@]}")"
   [[ -z "$picked" ]] && return 0
