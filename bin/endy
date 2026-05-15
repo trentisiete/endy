@@ -278,16 +278,20 @@ EOF
 cmd_overview() {
   if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<'EOF'
-usage: endy overview [--clean] [--no-attach]
+usage: endy overview [--clean] [--no-attach] [--all|--live]
 
 Global aggregator session named "endy" — pure management session, no
 orchestrator window. Aggregates tasks/agents from every endy-* per-dir
 session into one place.
 
-Layout: tree · list · browse · docs (cross-session views).
+Layout: tree · list · handoffs · browse · docs (cross-session views).
 
   --clean       kill the session and rebuild
   --no-attach   create the session but don't attach
+  --all         include tasks from sessions that are no longer alive
+                (this is the default for overview)
+  --live        opt back into hide-dead-sessions filtering — only
+                tasks whose session is still running show up
 EOF
     return 0
   fi
