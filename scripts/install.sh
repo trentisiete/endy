@@ -6,11 +6,29 @@
 #   2. ~/.codex/skills/<skill>/          ← symlink each codex/skills/* dir
 #   3. ~/.config/opencode/agents/        ← symlink each opencode/agents/*.md
 #   4. ~/.commandcode/agents/            ← symlink each commandcode/agents/*.md
-#   5. ~/.codex/config.toml              ← append/refresh endy block (currently
+#   5. Memory hooks so every CLI auto-loads endy context on startup:
+#        ~/.codex/AGENTS.md              ← symlink to ENDY_ROOT/AGENTS.md
+#        ~/.commandcode/AGENTS.md        ← symlink to ENDY_ROOT/AGENTS.md
+#        ~/.config/opencode/AGENTS.md    ← symlink to ENDY_ROOT/AGENTS.md
+#        ~/.claude/CLAUDE.md             ← append marked endy block (preserves
+#                                          user prefs above/below the markers)
+#        ~/.gemini/GEMINI.md             ← append marked endy block
+#        ~/.hermes/SOUL.md               ← append marked endy block
+#   6. ~/.local/bin/endy                 ← symlink so `endy` is on PATH
+#   7. Shell completion (zsh + bash)    ← sourced from rc file
+#   8. ~/.codex/config.toml              ← append/refresh endy block (currently
 #                                          MCP servers commented out — hybrid
 #                                          bash mode is active)
 #
-# Real files at target paths are moved aside as .bak.<ts>, not deleted.
+# Files mentioned in step 5 are managed in two modes:
+#   - SYMLINK targets (codex/cmd/opencode AGENTS.md): any existing file is
+#     moved aside as .bak.<ts> and replaced with a symlink to ENDY_ROOT/AGENTS.md.
+#     Re-running just refreshes the symlink — no backup churn.
+#   - APPEND targets (claude/gemini/hermes): a `# >>> endy v0.1` marked block
+#     is appended on first run and replaced in-place on subsequent runs. The
+#     user's content outside the markers is left untouched. This is the right
+#     mode for files that double as personal-preferences memory.
+#
 # Re-running this script is safe and idempotent.
 
 set -euo pipefail
@@ -39,6 +57,9 @@ CODEX_DIR="${HOME}/.codex"
 CODEX_SKILLS_DIR="${CODEX_DIR}/skills"
 OPENCODE_DIR="${HOME}/.config/opencode"
 CMDCODE_DIR="${HOME}/.commandcode"
+CLAUDE_DIR="${HOME}/.claude"
+GEMINI_DIR="${HOME}/.gemini"
+HERMES_DIR="${HOME}/.hermes"
 LOCAL_BIN="${HOME}/.local/bin"
 
 CODEX_CONFIG="${CODEX_DIR}/config.toml"
@@ -78,7 +99,13 @@ Will symlink:
   ${ENDY_ROOT}/commandcode/agents/*.md     →  ${CMDCODE_DIR}/agents/
   ${ENDY_ROOT}/AGENTS.md                   →  ${CODEX_DIR}/AGENTS.md
   ${ENDY_ROOT}/AGENTS.md                   →  ${CMDCODE_DIR}/AGENTS.md
+  ${ENDY_ROOT}/AGENTS.md                   →  ${OPENCODE_DIR}/AGENTS.md
   ${ENDY_ROOT}/bin/endy                    →  ${LOCAL_BIN}/endy   (if confirmed)
+
+Will append/refresh marked endy block in (preserves your existing prefs):
+  ${CLAUDE_DIR}/CLAUDE.md   (Claude Code memory)
+  ${GEMINI_DIR}/GEMINI.md   (Gemini CLI memory)
+  ${HERMES_DIR}/SOUL.md     (Hermes memory)
 
 Will modify (with backup):
   ${CODEX_CONFIG}   (append/replace endy v0.1 block)
@@ -152,7 +179,7 @@ link_dir "${ENDY_ROOT}/commandcode/agents" "${CMDCODE_DIR}/agents" md
 # ----------------------------------------------------------------------------
 # 5. Symlink AGENTS.md so every agent loads endy context globally.
 # ----------------------------------------------------------------------------
-say "5/8 Global AGENTS.md (so codex/cmd auto-load endy context) …"
+say "5/8 Memory hooks (every CLI auto-loads endy context on startup) …"
 link_one_file() {
   local src="$1" target="$2"
   if [[ -L "$target" ]]; then
@@ -167,9 +194,78 @@ link_one_file() {
     ok "linked $target"
   fi
 }
+
+# Append/refresh a marked endy block at the bottom of a memory file the user
+# also uses for their own preferences (Claude CLAUDE.md, Gemini GEMINI.md,
+# Hermes SOUL.md). Content outside the markers is preserved verbatim. The
+# block is rewritten on every install run so context updates flow through.
+endy_block_label="endy v0.1"
+append_endy_block() {
+  local target="$1" comment_open comment_close
+  case "$target" in
+    *.md|*.markdown) comment_open='<!--'; comment_close='-->' ;;
+    *)               comment_open='#';    comment_close='' ;;
+  esac
+  local marker_begin="${comment_open} >>> ${endy_block_label} (managed by endy install — do not edit between markers) ${comment_close}"
+  local marker_end="${comment_open} <<< ${endy_block_label} ${comment_close}"
+  local block
+  block=$(cat <<BLOCK
+${marker_begin}
+
+You're running inside **endy**, a tmux-based control plane that hands a coding
+task between CLI agents (codex, opencode, cmd, hermes, claude, gemini) when
+one runs out of free tier.
+
+On startup, glance at:
+- ${ENDY_ROOT}/AGENTS.md — full reference (delegation primitives, personas, CLI gotchas)
+- \`endy watch tree\` — what other agents are working on right now in this project
+- \`endy doctor\` — which agents are installed + which sessions are live
+
+When you hit a rate limit, tell the user to run:
+\`endy handoff <task-id> --to <other-agent> --reason "<short>"\`
+The next agent picks up with your prompt + the last 80 lines of your output.
+You can list yourself with \`endy watch list\` to find your task-id.
+
+${marker_end}
+BLOCK
+)
+
+  mkdir -p "$(dirname "$target")"
+  if [[ ! -e "$target" ]]; then
+    printf '%s\n' "$block" > "$target"
+    ok "created $target with endy block"
+    return 0
+  fi
+
+  # Strip any prior endy block (between markers) and append fresh.
+  local tmp
+  tmp="$(mktemp)"
+  awk -v b="$marker_begin" -v e="$marker_end" '
+    $0 == b { skip=1; next }
+    $0 == e { skip=0; next }
+    !skip   { print }
+  ' "$target" > "$tmp"
+  # Trim trailing blank lines so we don't keep accreting whitespace.
+  sed -i -e ':a' -e '/^$/{$d;N;ba' -e '}' "$tmp" 2>/dev/null || true
+  # Re-append.
+  printf '%s\n\n%s\n' "$(cat "$tmp")" "$block" > "$target"
+  rm -f "$tmp"
+  ok "refreshed endy block in $target"
+}
+
+# 5a — symlink AGENTS.md for the CLIs that use the AGENTS.md convention
+#      (codex, cmd, opencode). They expect endy to own that file globally.
 link_one_file "${ENDY_ROOT}/AGENTS.md" "${CODEX_DIR}/AGENTS.md"
 mkdir -p "${CMDCODE_DIR}"
 link_one_file "${ENDY_ROOT}/AGENTS.md" "${CMDCODE_DIR}/AGENTS.md"
+mkdir -p "${OPENCODE_DIR}"
+link_one_file "${ENDY_ROOT}/AGENTS.md" "${OPENCODE_DIR}/AGENTS.md"
+
+# 5b — append-block for CLIs whose memory file doubles as user preferences
+#      (Claude, Gemini, Hermes). We never clobber the user's own content.
+append_endy_block "${CLAUDE_DIR}/CLAUDE.md"
+append_endy_block "${GEMINI_DIR}/GEMINI.md"
+append_endy_block "${HERMES_DIR}/SOUL.md"
 
 # ----------------------------------------------------------------------------
 # 6. Optionally put `endy` on PATH via ~/.local/bin.
