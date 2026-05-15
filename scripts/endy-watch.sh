@@ -1108,24 +1108,23 @@ cmd_agents() {
     [[ -z "$agent_show" || "$agent_show" == "—" ]] && agent_show="$agent"
 
     local entry
-    entry="$(printf '   %s  %s%-10s%s %s%-9s%s  %s%-7s%s  %s%s%s\n' \
-              "$bullet" \
-              "$C_BOLD" "$agent_show" "$C_RST" \
-              "" "$status_str" "" \
-              "$C_DIM" "$runtime" "$C_RST" \
-              "$C_DIM" "$last_short" "$C_RST")"
+    printf -v entry '   %s  %s%-10s%s %-9s  %s%-7s%s  %s%s%s\n' \
+      "$bullet" \
+      "$C_BOLD" "$agent_show" "$C_RST" \
+      "$status_str" \
+      "$C_DIM" "$runtime" "$C_RST" \
+      "$C_DIM" "$last_short" "$C_RST"
     sess_buffer+=("$entry")
 
-    if [[ "$status_str" == "live" || "$status_str" == "working" || "$status_str" == "running" ]]; then
-      sess_buffer+=("$(printf '       %s└─ tmux attach -t %s  →  Ctrl-b w%s\n' "$C_DIM" "$session" "$C_RST")")
-    fi
     if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
-      local stats_line; stats_line="$(_endy_print_agent_stats_line "       └─ " "$agent" "$cwd")"
+      local stats_line; stats_line="$(_endy_print_agent_stats_line "       " "$agent" "$cwd")"
       [[ -n "$stats_line" ]] && sess_buffer+=("$stats_line"$'\n')
     fi
   done
   _flush_card
-  printf '\n'
+  if [[ -n "$prev_session" ]]; then
+    printf '\n  %stmux attach -t <session>  Ctrl-b w  to focus a window%s\n\n' "$C_DIM" "$C_RST"
+  fi
 }
 
 # ---------------------------------------------------------------------------

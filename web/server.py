@@ -118,7 +118,7 @@ def strip_ansi(s: str) -> str:
 def parse_meta(meta_path: Path) -> dict:
     out = {}
     try:
-        for line in meta_path.read_text(errors="replace").splitlines():
+        for line in meta_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if "=" in line:
                 k, v = line.split("=", 1)
                 out[k.strip()] = v.strip()
@@ -189,7 +189,7 @@ def task_status(log_path: Path, meta_data: dict | None = None) -> str:
             return "ABANDONED"
         return "CHAT" if kind == "chat" else "PENDING"
     try:
-        text = log_path.read_text(errors="replace")
+        text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         if meta_data and not window_exists:
             return "ABANDONED"
@@ -211,7 +211,7 @@ def task_last_line(log_path: Path, kind: str = "spawn") -> str:
     if not log_path.exists():
         return ""
     try:
-        text = log_path.read_text(errors="replace")
+        text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     for ln in reversed(text.splitlines()):
@@ -233,7 +233,7 @@ def task_model(log_path: Path, meta_data: dict) -> str:
         return model
     agent = meta_data.get("agent", "")
     try:
-        text = strip_ansi(log_path.read_text(errors="replace"))
+        text = strip_ansi(log_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return ""
     if agent == "opencode":
@@ -312,11 +312,11 @@ def task_detail(tid: str) -> dict | None:
     prompt_path = meta_prompt_path(tid, meta_data, meta_path=meta_path)
     log_text = ""
     if log_path.exists():
-        text = log_path.read_text(errors="replace")
+        text = log_path.read_text(encoding="utf-8", errors="replace")
         # Last 200 lines
         lines = text.splitlines()
         log_text = strip_ansi("\n".join(lines[-200:]))
-    prompt_text = prompt_path.read_text(errors="replace") if prompt_path.exists() else ""
+    prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace") if prompt_path.exists() else ""
     return {
         "task_id": tid,
         "kind": meta_data.get("kind", "spawn"),
@@ -454,7 +454,7 @@ def stream_log(handler, tid: str):
     saw_exit = False
     last_heartbeat = time.time()
     try:
-        with log_path.open("r", errors="replace") as fp:
+        with log_path.open("r", encoding="utf-8", errors="replace") as fp:
             while True:
                 fp.seek(last_size)
                 chunk = fp.read()
@@ -613,7 +613,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # Static frontend
         if method == "GET" and path == "/":
-            html = (WEB_DIR / "index.html").read_text()
+            html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
             return send_text(self, 200, html, "text/html; charset=utf-8")
 
         # Personas dropdown population
