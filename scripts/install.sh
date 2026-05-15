@@ -3,7 +3,14 @@
 #
 # Steps (each is announced before running; one confirmation up front):
 #   1. ~/.codex/agents/                  ← symlink each codex/agents/*.toml
-#   2. ~/.codex/skills/<skill>/          ← symlink each codex/skills/* dir
+#   2. Skills — symlink each codex/skills/<skill>/ into every CLI's actual
+#      auto-discovery path:
+#        ~/.agents/skills/<skill>/       Codex (canonical, per agentskills.io)
+#        ~/.codex/skills/<skill>/        Codex (legacy back-compat)
+#        ~/.claude/skills/<skill>/       Claude Code (live change detection)
+#        ~/.hermes/skills/<skill>/       Hermes (auto-registers as /slash)
+#      OpenCode picks them up via the Claude-Code compat path. Gemini CLI
+#      doesn't have a skills directory — it loads context via GEMINI.md.
 #   3. ~/.config/opencode/agents/        ← symlink each opencode/agents/*.md
 #   4. ~/.commandcode/agents/            ← symlink each commandcode/agents/*.md
 #   5. Memory hooks so every CLI auto-loads endy context on startup:
@@ -54,12 +61,15 @@ EOF
 done
 
 CODEX_DIR="${HOME}/.codex"
-CODEX_SKILLS_DIR="${CODEX_DIR}/skills"
+CODEX_SKILLS_DIR="${CODEX_DIR}/skills"        # legacy Codex skills path (kept for back-compat)
+AGENTSKILLS_DIR="${HOME}/.agents/skills"      # canonical path per agentskills.io — Codex scans this
 OPENCODE_DIR="${HOME}/.config/opencode"
 CMDCODE_DIR="${HOME}/.commandcode"
 CLAUDE_DIR="${HOME}/.claude"
+CLAUDE_SKILLS_DIR="${CLAUDE_DIR}/skills"
 GEMINI_DIR="${HOME}/.gemini"
 HERMES_DIR="${HOME}/.hermes"
+HERMES_SKILLS_DIR="${HERMES_DIR}/skills"
 LOCAL_BIN="${HOME}/.local/bin"
 
 CODEX_CONFIG="${CODEX_DIR}/config.toml"
@@ -94,7 +104,10 @@ ENDY_ROOT = ${ENDY_ROOT}
 
 Will symlink:
   ${ENDY_ROOT}/codex/agents/*.toml         →  ${CODEX_DIR}/agents/
-  ${ENDY_ROOT}/codex/skills/*              →  ${CODEX_SKILLS_DIR}/
+  ${ENDY_ROOT}/codex/skills/<name>/        →  ${AGENTSKILLS_DIR}/<name>/  (Codex canonical)
+                                           +  ${CODEX_SKILLS_DIR}/<name>/  (Codex legacy)
+                                           +  ${CLAUDE_SKILLS_DIR}/<name>/ (Claude Code)
+                                           +  ${HERMES_SKILLS_DIR}/<name>/ (Hermes)
   ${ENDY_ROOT}/opencode/agents/*.md        →  ${OPENCODE_DIR}/agents/
   ${ENDY_ROOT}/commandcode/agents/*.md     →  ${CMDCODE_DIR}/agents/
   ${ENDY_ROOT}/AGENTS.md                   →  ${CODEX_DIR}/AGENTS.md
@@ -149,13 +162,27 @@ link_dir() {
 say "1/8 Codex agents …"
 link_dir "${ENDY_ROOT}/codex/agents" "${CODEX_DIR}/agents" toml
 
-say "2/8 Codex skills …"
-mkdir -p "${CODEX_SKILLS_DIR}"
-shopt -s nullglob
-for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
-  [[ -d "$skill_src" ]] || continue
-  skill_name="$(basename "$skill_src")"
-  target="${CODEX_SKILLS_DIR}/${skill_name}"
+say "2/8 Skills (agentskills.io standard — auto-discovered by every CLI) …"
+# Each endy skill is a directory with SKILL.md + frontmatter. Per official
+# docs (May 2026):
+#   - Codex scans $HOME/.agents/skills/ (canonical agentskills.io path) and
+#     $CWD/.agents/skills/ from the project. The old $HOME/.codex/skills/
+#     was never a documented location — we keep it as a back-compat link
+#     in case some users rely on it, but the real wire is .agents/skills/.
+#   - Claude Code scans $HOME/.claude/skills/ (auto-discovers, live change
+#     detection).
+#   - Hermes scans $HOME/.hermes/skills/ (each skill auto-registers as a
+#     /slash-command).
+#   - OpenCode reads skills via its Claude Code compat path (~/.claude/skills/)
+#     when no native skills dir is configured.
+#   - Gemini CLI loads context via GEMINI.md imports, not a skills dir.
+# So we symlink each skill into all four canonical homes. Same SKILL.md,
+# four pickup paths.
+link_skill_into() {
+  local skill_src="$1" base="$2"
+  local skill_name; skill_name="$(basename "$skill_src")"
+  mkdir -p "$base"
+  local target="${base}/${skill_name}"
   if [[ -L "$target" ]]; then
     ln -sfn "${skill_src%/}" "$target"
     ok "relinked $target"
@@ -167,6 +194,15 @@ for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
     ln -s "${skill_src%/}" "$target"
     ok "linked $target"
   fi
+}
+
+shopt -s nullglob
+for skill_src in "${ENDY_ROOT}/codex/skills"/*/; do
+  [[ -d "$skill_src" ]] || continue
+  link_skill_into "${skill_src%/}" "${AGENTSKILLS_DIR}"     # Codex canonical
+  link_skill_into "${skill_src%/}" "${CODEX_SKILLS_DIR}"    # Codex legacy (back-compat)
+  link_skill_into "${skill_src%/}" "${CLAUDE_SKILLS_DIR}"   # Claude Code
+  link_skill_into "${skill_src%/}" "${HERMES_SKILLS_DIR}"   # Hermes (auto /slash-command)
 done
 shopt -u nullglob
 
