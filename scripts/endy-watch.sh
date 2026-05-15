@@ -84,7 +84,7 @@ _aggregate_log_dirs() {
   fi
 }
 
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+if [[ -n "${ENDY_FORCE_COLOR:-}" || ( -t 1 && -z "${NO_COLOR:-}" ) ]]; then
   C_RST=$'\033[0m'
   C_DIM=$'\033[2m'
   C_BOLD=$'\033[1m'
@@ -686,7 +686,7 @@ cmd_list_picker() {
   sel="$(printf '%s\n' "${picker_lines[@]}" \
     | fzf --no-sort --reverse --ansi --header="$fzf_header" \
           --preview-window='right:60%:wrap' \
-          --preview "id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch view \$id 2>&1 | head -50" \
+          --preview "id=\$(echo {} | awk '{print \$2}'); ENDY_FORCE_COLOR=1 ${ENDY_ROOT}/bin/endy watch peek \$id 2>&1" \
           --bind "ctrl-y:execute-silent(echo {} | awk '{print \$2}' | tr -d '\n' | (command -v xclip >/dev/null && xclip -selection clipboard) || (command -v wl-copy >/dev/null && wl-copy) || (command -v clip.exe >/dev/null && clip.exe))" \
           --bind "ctrl-v:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch view \$id | less -R)" \
           --bind "ctrl-k:execute(id=\$(echo {} | awk '{print \$2}'); ${ENDY_ROOT}/bin/endy watch kill \$id; sleep 1)+reload(${ENDY_ROOT}/bin/endy watch list 2>/dev/null | grep -E '^[● ○▲✕·]' || true)" \
@@ -857,7 +857,7 @@ cmd_sessions() {
 
   local now; now="$(date +%s)"
   local have_color=0
-  [[ -t 1 && -z "${NO_COLOR:-}" ]] && have_color=1
+  if [[ -n "${ENDY_FORCE_COLOR:-}" || ( -t 1 && -z "${NO_COLOR:-}" ) ]]; then have_color=1; fi
 
   local C_RST="" C_DIM="" C_BOLD="" C_BLU="" C_GRN="" C_YLW="" C_RED="" C_CYN=""
   if [[ "$have_color" == "1" ]]; then
@@ -1017,7 +1017,7 @@ cmd_agents() {
 
   local now; now="$(date +%s)"
   local have_color=0
-  [[ -t 1 && -z "${NO_COLOR:-}" ]] && have_color=1
+  if [[ -n "${ENDY_FORCE_COLOR:-}" || ( -t 1 && -z "${NO_COLOR:-}" ) ]]; then have_color=1; fi
 
   local C_RST="" C_DIM="" C_BOLD="" C_BLU="" C_GRN="" C_YLW="" C_RED="" C_CYN="" C_MAG=""
   if [[ "$have_color" == "1" ]]; then
@@ -1490,6 +1490,11 @@ cmd_tree() {
       _endy_print_agent_stats_line "       " "$agent" "$cwd"
     fi
   done
+  # Trailing hint so first-time users discover the interactive panes — tree
+  # itself is read-only by design, but `list` and `browse` next to it let
+  # the cursor pick up where the eye stopped.
+  printf '\n  %s· lectura · para interactuar: %sCtrl-b 1%s %slist%s · %sCtrl-b 2%s %sbrowse%s\n' \
+    "$C_DIM" "$C_BOLD" "$C_RST" "$C_DIM" "$C_RST" "$C_BOLD" "$C_RST" "$C_DIM" "$C_RST"
 }
 
 cmd_dir() {
@@ -1522,6 +1527,102 @@ cmd_log() {
 
 # ---------------------------------------------------------------------------
 # view — one-shot dump (meta + prompt + last 200 log lines), through less
+# ---------------------------------------------------------------------------
+# peek — colorful, structured preview of one task. Designed for fzf
+# --preview, but works as a CLI command on its own.
+# ---------------------------------------------------------------------------
+
+cmd_peek() {
+  local prefix="${1:-}"
+  [[ -n "$prefix" ]] || { echo "usage: endy watch peek <id-prefix>" >&2; exit 2; }
+
+  local id; id="$(resolve_id "$prefix")" || return 1
+  local meta; meta="$(_meta_for_id "$id")"
+  [[ -f "$meta" ]] || { echo "no meta for $id" >&2; return 1; }
+
+  local agent;       agent="$(meta_field "$meta" agent)"
+  local persona;     persona="$(meta_field "$meta" persona)"
+  local model;       model="$(meta_field "$meta" model)"
+  local cwd;         cwd="$(meta_field "$meta" cwd)"
+  local spawned_iso; spawned_iso="$(meta_field "$meta" spawned_at)"
+  local kind;        kind="$(meta_field "$meta" kind)"; kind="${kind:-spawn}"
+  local window;      window="$(meta_field "$meta" window)"
+  local task_session="${window%%:*}"
+  local log;         log="$(task_log_path "$meta" "$id")"
+  local parent;      parent="$(meta_field "$meta" parent_task)"
+  local handoff_from;   handoff_from="$(meta_field "$meta" handoff_from)"
+  local handoff_reason; handoff_reason="$(meta_field "$meta" handoff_reason)"
+  local status; status="$(log_status "$log" "$id" "$kind" "$task_session")"
+  local now; now="$(date +%s)"
+  local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
+  local runtime="?"
+  [[ "$spawned_epoch" != "0" ]] && runtime="$(human_runtime $((now - spawned_epoch)))"
+
+  local sess_color; sess_color="$(_endy_session_color "$task_session")"
+  local bullet; bullet="$(_endy_status_bullet "$status")"
+
+  # ── session header ──
+  printf '%s▎%s %s%s%s%s' \
+    "$sess_color" "$C_RST" \
+    "$C_BOLD" "$sess_color" "$task_session" "$C_RST"
+  [[ -n "$cwd" ]] && printf '   %s%s%s' "$C_DIM" "$cwd" "$C_RST"
+  printf '\n'
+  printf '  %s%s%s\n\n' "$C_DIM" "$(printf '─%.0s' {1..58})" "$C_RST"
+
+  # ── peers in this session (live agent windows + other tasks) ──
+  local printed_peers=0
+  if [[ -n "$task_session" ]] && tmux has-session -t "$task_session" 2>/dev/null; then
+    while IFS=$'\t' read -r wname wcmd wpath; do
+      [[ -n "$wname" ]] || continue
+      case "$wname" in
+        watch|browse|docs|tree|sessions|agents|panel|help|logs|list|__bootstrap) continue ;;
+        task-*|chat-*|follow-*|diag*) continue ;;
+      esac
+      local twagent; twagent="$(_endy_detect_pane_agent "${task_session}:${wname}" "$wname" "$wcmd")"
+      [[ "$twagent" == "shell" ]] && continue
+      printf '   %s  %s%-9s%s   %s%s%s\n' \
+        "$(_endy_status_bullet running)" \
+        "$C_BOLD" "$twagent" "$C_RST" \
+        "$C_DIM" "$wname" "$C_RST"
+      printed_peers=1
+    done < <(tmux list-windows -t "$task_session" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}' 2>/dev/null)
+  fi
+  [[ "$printed_peers" == "0" ]] && printf '   %s(no other agents in this session)%s\n' "$C_DIM" "$C_RST"
+
+  printf '\n  %s━━━ task seleccionado ━━%s\n\n' "$C_DIM" "$C_RST"
+
+  # ── selected task card ──
+  printf '   %s  %s%s%s\n' "$bullet" "$C_BOLD" "$id" "$C_RST"
+  local kv_fmt='       %s%-9s%s %s\n'
+  printf "$kv_fmt" "$C_DIM" "agent"   "$C_RST" "${agent:-—}${persona:+ ${C_DIM}[$persona]${C_RST}}"
+  printf "$kv_fmt" "$C_DIM" "status"  "$C_RST" "$status"
+  printf "$kv_fmt" "$C_DIM" "runtime" "$C_RST" "$runtime"
+  printf "$kv_fmt" "$C_DIM" "cwd"     "$C_RST" "${cwd:-—}"
+  [[ -n "$model"  && "$model"  != "—" ]] && printf "$kv_fmt" "$C_DIM" "model"  "$C_RST" "$model"
+  [[ -n "$parent" && "$parent" != "—" ]] && printf "$kv_fmt" "$C_DIM" "parent" "$C_RST" "$(short_task_ref "$parent")"
+  if [[ -n "$handoff_from" ]]; then
+    printf "$kv_fmt" "$C_DIM" "handoff" "$C_RST" "↪ from $(short_task_ref "$handoff_from")${handoff_reason:+ ${C_DIM}· ${handoff_reason}${C_RST}}"
+  fi
+
+  # ── stats line if applicable ──
+  if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
+    local stats; stats="$(_endy_print_agent_stats_line "       " "$agent" "$cwd")"
+    [[ -n "$stats" ]] && printf '%s\n' "$stats"
+  fi
+
+  # ── last lines of the log ──
+  printf '\n  %s──── último output ────%s\n' "$C_DIM" "$C_RST"
+  if [[ "$kind" == "chat" ]]; then
+    printf '  %s(interactive pane — use Ctrl-V for full view)%s\n' "$C_DIM" "$C_RST"
+  elif [[ -f "$log" ]]; then
+    grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
+      | tail -n 12 | strip_ansi | tr -d '\r' \
+      | awk -v dim="${C_DIM:-}" -v rst="${C_RST:-}" '{printf "  %s%s%s\n", dim, $0, rst}'
+  else
+    printf '  %s(no log yet)%s\n' "$C_DIM" "$C_RST"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 
 cmd_view() {
@@ -2544,6 +2645,7 @@ case "${1:-attach}" in
   agents)        shift; cmd_agents "$@" ;;
   log)           shift; cmd_log "$@" ;;
   view)          shift; cmd_view "$@" ;;
+  peek)          shift; cmd_peek "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
   _open)         shift; cmd_open "$@" ;;

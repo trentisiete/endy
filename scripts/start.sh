@@ -108,6 +108,10 @@ open_view_window() {
   tmux new-window -t "$SESSION" -n "$window" -c "$ENDY_ROOT" \
     "bash -lc $(printf '%q' "export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
+# Force ANSI color from inside endy: the pipe to awk below makes stdout
+# a pipe (not a tty) for endy, so its [-t 1] color autodetect would
+# return false and strip every color. ENDY_FORCE_COLOR overrides that.
+export ENDY_FORCE_COLOR=1
 # In-place redraw: clear once at start, then on each tick home the cursor
 # and rewrite — never call \\\`clear\\\` again. To avoid leftover characters
 # when a new line is shorter than the previous, every output line gets
@@ -118,8 +122,8 @@ clear
 while :; do
   cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
   printf '\033[H'
-  printf '\033[1;36m${title}\033[0m \033[2m| session=${SESSION} | refresh ${ENDY_REFRESH_INTERVAL:-2}s (no flicker) | Ctrl-c -> shell\033[0m\033[K\n'
-  printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\033[K\n\033[K\n'
+  printf '\033[95m▌\033[0m\033[1;95m endy \033[0m\033[2;95m›\033[0m \033[1;36m${title}\033[0m  \033[2m· ${SESSION} · refresh ${ENDY_REFRESH_INTERVAL:-2}s · Ctrl-c shell\033[0m\033[K\n'
+  printf '  \033[2;33mtmux:\033[0m \033[2mCtrl-b w\033[0m \033[2;90mventanas\033[0m  \033[2mCtrl-b n/p\033[0m \033[2;90msig/ant\033[0m  \033[2mCtrl-b d\033[0m \033[2;90mdetach\033[0m\033[K\n\033[K\n'
   { ${q_endy_root}/bin/endy watch${q_args} 2>&1 || true; } | awk '{printf \"%s\033[K\n\", \$0}'
   printf '\033[J'
   sleep \${ENDY_REFRESH_INTERVAL:-2} || break
@@ -144,9 +148,8 @@ open_browse_window() {
 clear
 export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
-printf '\033[1;36mendy watch browse \033[0m\033[2m| session=${SESSION} | auto-relaunch\033[0m\n'
-printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n'
-printf '\033[1;33menter chat/switch | Ctrl-o chat bg | Ctrl-f follow | Ctrl-v view | Ctrl-l log | Ctrl-k kill | Ctrl-d purge | esc salir\033[0m\n\n'
+printf '\033[95m▌\033[0m\033[1;95m endy \033[0m\033[2;95m›\033[0m \033[1;36mbrowse\033[0m  \033[2m· session=${SESSION} · auto-relaunch\033[0m\n'
+printf '  \033[2;33mtmux:\033[0m \033[2mCtrl-b w/n/p/d\033[0m  \033[2;33m·\033[0m  \033[2;33mpicker:\033[0m \033[2menter\033[0m \033[2;90mchat/switch\033[0m  \033[2mCtrl-o\033[0m \033[2;90mchat bg\033[0m  \033[2mCtrl-f\033[0m \033[2;90mfollow\033[0m  \033[2mCtrl-v\033[0m \033[2;90mview\033[0m  \033[2mCtrl-l\033[0m \033[2;90mlog\033[0m  \033[2mCtrl-k\033[0m \033[2;90mkill\033[0m  \033[2mesc\033[0m \033[2;90msalir\033[0m\n\n'
 while :; do
   cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
   ${q_endy_root}/bin/endy watch browse${q_args}
@@ -175,9 +178,8 @@ open_list_picker_window() {
 clear
 export ENDY_SESSION=${q_session}
 export ENDY_LOG_DIR=${q_log_dir}
-printf '\033[1;36mendy watch list \033[0m\033[2m| session=${SESSION} | flechas para navegar | auto-relaunch\033[0m\n'
-printf '\033[1;33mtmux: Ctrl-b w ventanas | Ctrl-b n/p sig/ant | Ctrl-b d detach\033[0m\n'
-printf '\033[1;33menter log | Ctrl-v view | Ctrl-y copy id | Ctrl-k kill | esc salir\033[0m\n\n'
+printf '\033[95m▌\033[0m\033[1;95m endy \033[0m\033[2;95m›\033[0m \033[1;36mlist\033[0m  \033[2m· session=${SESSION} · flechas para navegar · auto-relaunch\033[0m\n'
+printf '  \033[2;33mtmux:\033[0m \033[2mCtrl-b w/n/p/d\033[0m  \033[2;33m·\033[0m  \033[2;33mpicker:\033[0m \033[2menter\033[0m \033[2;90mlog\033[0m  \033[2mCtrl-v\033[0m \033[2;90mview\033[0m  \033[2mCtrl-y\033[0m \033[2;90mcopy id\033[0m  \033[2mCtrl-k\033[0m \033[2;90mkill\033[0m  \033[2mesc\033[0m \033[2;90msalir\033[0m\n\n'
 while :; do
   cd ${q_endy_root} 2>/dev/null || cd /tmp 2>/dev/null || true
   ${q_endy_root}/bin/endy watch list --picker${q_args}
