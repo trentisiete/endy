@@ -34,6 +34,12 @@ attach=1
 clean=0
 serve_opencode=0
 show_logs=0
+# show_all controls whether the management views (tree, browse) include
+# tasks from sessions that are no longer alive. Default ON for overview
+# (the user expects to see EVERYTHING when they open the global view);
+# OFF for per-dir (the per-dir view is meant to focus on the current
+# project's live work).
+show_all=
 launch_cwd="$(pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,12 +49,18 @@ while [[ $# -gt 0 ]]; do
     --clean) clean=1; shift ;;
     --serve-opencode) serve_opencode=1; shift ;;
     --logs) show_logs=1; shift ;;
+    --all|-a) show_all=1; shift ;;
+    --live)   show_all=0; shift ;;   # opt back into the live-only filter
     -h|--help)
       sed -n '2,22p' "$0"
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+# Default: overview shows everything, per-dir shows live only.
+if [[ -z "$show_all" ]]; then
+  [[ "$mode" == "overview" ]] && show_all=1 || show_all=0
+fi
 
 case "$mode" in
   overview)
@@ -223,16 +235,26 @@ open_manager_windows() {
   kill_window_if_exists watch
   kill_window_if_exists help
 
+  # show_all controls --live (filter dead sessions) vs --all (include
+  # finished tasks). Defaults: overview=true, per-dir=false.
+  local tree_args=() browse_args=()
   if [[ "$mode" == "overview" ]]; then
-    open_view_window        tree     'endy watch tree - arbol de tareas (todas las sesiones)'   tree --overview --live --all
+    tree_args=(tree --overview --all)
+    browse_args=(--overview)
+    [[ "$show_all" == "1" ]] && browse_args+=(--all) || browse_args+=(--live)
+    [[ "$show_all" == "1" ]] || tree_args+=(--live)
+    open_view_window        tree     'endy watch tree - arbol de tareas (todas las sesiones)'   "${tree_args[@]}"
     open_list_picker_window
     open_view_window        handoffs 'endy watch handoffs - cadenas de handoff por sesion'      handoffs
-    open_browse_window --overview --live
+    open_browse_window "${browse_args[@]}"
   else
-    open_view_window        tree     'endy watch tree - arbol de tareas de esta sesion'         tree --all
+    tree_args=(tree --all)
+    browse_args=()
+    [[ "$show_all" == "1" ]] && browse_args=(--all) || tree_args+=(--live)
+    open_view_window        tree     'endy watch tree - arbol de tareas de esta sesion'         "${tree_args[@]}"
     open_list_picker_window
     open_view_window        handoffs 'endy watch handoffs - cadenas de handoff'                 handoffs
-    open_browse_window
+    open_browse_window "${browse_args[@]}"
   fi
   open_docs_window
 }
