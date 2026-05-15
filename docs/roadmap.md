@@ -76,42 +76,54 @@ headroom each provider has.
 - Tier headroom for the routed providers comes from `multiplexor status
   --json <agent>` — the JSON contract was prepared during Phase 2.
 
-## Phase 4 — Auto-detection of exhaustion (next)
+## Phase 4 — Auto-detection of exhaustion (shipped)
 
-Today the user (or an orchestrator) decides when to call `endy
-handoff`. Phase 4 detects exhaustion from CLI stderr signals and fires
-the handoff itself.
+Detects exhaustion from CLI stderr signals and fires `endy handoff`
+automatically — closing the loop on the "never run out of tier" pitch.
 
-Provider-specific signals to watch for:
+What landed:
 
-| CLI | Signal |
+- `scripts/lib/exhaustion.sh` — per-agent signal detector, single
+  function `_endy_detect_exhaustion <agent> <log-path>` returning a
+  short reason string (e.g. `rate_limit_exceeded`, `max_turns`,
+  `provider_quota`, `auth_failed`, `auth_required`, `credit_exhausted`,
+  `model_unavailable`) or empty. Covers gemini, opencode, cmd, hermes,
+  claude, codex.
+- `scripts/auto-handoff.sh` — orchestrator. Reads task meta + log,
+  checks ENDY_EXIT≠0 + exhaustion signal + opt-outs, calls `endy
+  handoff <id> --reason "auto: <signal>"`. Appends a clear
+  `[endy] auto-handoff triggered: agent=X reason=Y` line to the parent
+  log so the trail is visible.
+- `scripts/spawn-long-task.sh` — appends `scripts/auto-handoff.sh
+  <task-id>` to INNER_CMD after the agent exits and ENDY_EXIT lands.
+  New flag `--no-auto-handoff` records `auto_handoff=0` in the task
+  meta to opt out per-task.
+- Opt-outs (in order checked): `ENDY_AUTO_HANDOFF=0` env, `auto_handoff=0`
+  in meta, `<cwd>/.endy/no-auto-handoff` marker file, handoff_chain
+  depth ≥ 5 (loop prevention).
+- `tests/smoke-auto-handoff.sh` — 31 checks: 15 detector unit tests
+  (per agent + negative cases), 6 E2E (synthesized fake exhausted task
+  → handoff fires → child meta verified), 5 opt-out / loop-prevention
+  cases, 1 false-positive guard. Verified passing on WSL/Ubuntu.
+
+Signal coverage per agent (the exact patterns are in
+`scripts/lib/exhaustion.sh`):
+
+| CLI | Reasons emitted |
 |---|---|
-| gemini | `RESOURCE_EXHAUSTED`, HTTP 429 with `quota` |
-| opencode | `ProviderModelNotFoundError`, `rate_limit_exceeded`, `insufficient_quota` |
-| cmd | `Unauthorized` on credit, `Reached maximum conversation turns` |
-| hermes | session terminator without `session_id` emission |
-| claude | `usage_limit_exceeded`, `Anthropic API Error 429` |
+| gemini | `rate_limit_exceeded` (RESOURCE_EXHAUSTED / quotaExceeded / 429), `auth_required` (GEMINI_API_KEY missing) |
+| opencode | `provider_quota` (ProviderModelNotFoundError / rate_limit_exceeded / insufficient_quota), `auth_failed` (Unauthorized / InvalidApiKey) |
+| cmd | `max_turns` (Reached maximum conversation turns), `credit_exhausted` (insufficient credit / payment required), `auth_failed` (Unauthorized) |
+| hermes | `rate_limit_exceeded` (429 / too many requests), `model_unavailable` (model_not_supported / invalid_request_error) |
+| claude | `rate_limit_exceeded` (usage_limit_exceeded / rate_limit_error / 429), `auth_failed` (authentication_error / invalid api key) |
+| codex | `rate_limit_exceeded`, `auth_failed` |
 
-Implementation plan:
+Design principle: false positives are worse than missed handoffs.
+Generic markers like `Error:` / `Exception:` are deliberately NOT in
+the detector — the patterns are taken from the specific phrases each
+CLI emits in real exhaustion events.
 
-- `scripts/lib/exhaustion.sh` — per-agent regex matchers, single
-  function `endy_detect_exhaustion <agent> <log-path>` returning a
-  reason string or empty.
-- Hook in `spawn-long-task.sh` after `ENDY_EXIT=` lands: if the task
-  exited non-zero AND a known exhaustion signal is in the tail, auto-
-  invoke `endy handoff <id>` (which uses the resolver to pick the next
-  agent). Emit a `[endy] auto-handoff: <prev> → <next>` line so the user
-  knows it happened.
-- Opt-out flag `--no-auto-handoff` on spawn and a global config knob.
-- New smoke test `tests/smoke-auto-handoff.sh` simulating each
-  exhaustion signal against the offline stub and verifying the chain
-  fires automatically.
-
-Risks: false positives. The signal list above is conservative — anything
-ambiguous (generic `Error:` etc.) is not in scope. We'd rather miss a
-real exhaustion than route on a false alarm.
-
-## Phase 5 — Git worktree isolation (later)
+## Phase 5 — Git worktree isolation (next)
 
 Two agents working on the same files simultaneously is currently a
 foot-gun. Phase 5 makes every `endy spawn` (optionally) create a fresh
@@ -152,5 +164,6 @@ literally cannot stomp each other.
 |---|---|
 | 0 | `e67facb` (endy), `12c6e32` (multiplexor) |
 | 1 | `acd167d`, `f892073`, `74360f5` |
-| 2 | `c227761` (endy), `466a473`, `6138d3d`, `4248c57`, `55dfba1` (multiplexor) |
-| 3 | (see `endy watch list` and the recent main log) |
+| 2 | `c227761` (endy), `466a473`, `6138d3d`, `4248c57`, `55dfba1`, `74b5a9e` (multiplexor PyPI rename) |
+| 3 | `3bf6940` (endy state + skill + spawn auto-injection) |
+| 4 | _this commit_ (auto-handoff: exhaustion.sh + auto-handoff.sh + smoke) |

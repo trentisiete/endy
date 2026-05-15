@@ -142,15 +142,19 @@ labels match [docs/roadmap.md](docs/roadmap.md).
 | 2 | `multiplexor next-provider` + `multiplexor status --json` | shipped |
 | 3 | `endy state` snapshot + auto-prepended environment block | shipped |
 | 3 | `codex/skills/endy-state` Codex skill | shipped |
-| 4 | Auto-detection of exhaustion from CLI stderr signals | planned |
+| 4 | Auto-detection of exhaustion (CLI stderr → auto-handoff) | shipped |
 | 5 | Git worktree per spawned task (parallel isolation) | planned |
 | 6 | npm 0.6.0+ stable surface, real demo GIF, public launch | planned |
 
-Today you decide *when* to call `endy handoff`; multiplexor decides
-*who* picks up next. Phase 4 will detect exhaustion from CLI stderr
-signals (Gemini's `RESOURCE_EXHAUSTED`, opencode's
-`ProviderModelNotFoundError`, cmd's auth/quota errors, hermes's
-session-end markers) and dispatch the handoff itself.
+The loop now closes itself. When an agent task exits non-zero with a
+known exhaustion signal in its log (Gemini's `RESOURCE_EXHAUSTED`,
+opencode's `ProviderModelNotFoundError`, cmd's `Reached maximum
+conversation turns`, claude's `usage_limit_exceeded`, hermes's
+`model_not_supported`, etc.), endy invokes `endy handoff` automatically
+and multiplexor picks the next eligible agent. Disable per-task with
+`--no-auto-handoff`, globally with `ENDY_AUTO_HANDOFF=0`, per-project
+with a `.endy/no-auto-handoff` marker. Chain depth is capped at 5 to
+prevent runaway loops.
 
 ## Multiplexor
 
