@@ -261,6 +261,38 @@ against the persistence file the CLI writes to (`~/.commandcode/
 config.json`, `~/.hermes/config.yaml`, etc.) instead of the visible
 TUI, because the picker closes and the pane may go blank.
 
+### Picking a model when you don't know the catalog
+
+Models in each CLI change month to month. Do **not** rely on a static
+list in this skill — it will drift. Use this procedure instead:
+
+1. **Open the CLI's model picker.** Slash command if the CLI has one
+   (`/model` in cmd / opencode / gemini), subcommand if not (`hermes
+   model`), or boot-time flag if the CLI doesn't switch in-session
+   (claude, codex — see their subsections).
+2. **Capture what's there.** From outside the pane: `endy live capture
+   <name> --lines 40` after `send`-ing the slash command. You'll see
+   the list of models the CLI currently exposes, with the one marked
+   `❯` (or similar) being the active default.
+3. **For any model name you don't recognize, web-search it.** Look up
+   the provider's docs, model card, or recent benchmarks. Decide
+   whether it fits the task — context window, speed, cost, reasoning
+   depth, model family.
+4. **Pick + confirm.** Navigate with arrow keys (text-search via
+   `send` is debounced away by Ink/Bubble Tea TUIs), `Enter` to
+   confirm, then verify the persistence file (e.g.
+   `~/.commandcode/config.json`'s `model` field) — the picker often
+   closes immediately and the TUI doesn't echo the choice clearly.
+
+That's it. The CLI is the source of truth for what's available right
+now. The endy SKILL is not.
+
+What this skill *does* document for each CLI is stable: the auth flow,
+the CLI flag for model selection, the slash command, the persistence
+path, and any user-specific preferences (e.g. "the user's persisted
+default for cmd is Kimi K2.6"). Catalogs are not stable; procedures
+are.
+
 ### claude (Anthropic Claude Code)
 
 **Boot:**
@@ -297,18 +329,20 @@ background agents), `claude mcp` (MCP servers), `claude doctor` (health
 check), `claude plugin` (plugins), `claude ultrareview` (cloud
 multi-agent review of the current branch).
 
-**Models worth knowing (May 2026):**
-- `opus` → claude-opus-4-7 — flagship, long context, planning + heavy
-  reasoning. Default for substantial work.
-- `sonnet` → claude-sonnet-4-6 — balanced cost/quality, the daily
-  workhorse.
-- Older `claude-3-7-*`, `claude-4-*` series still resolvable by full
-  name if pinned.
+**Choosing a model:** claude does not switch in-session — you pick at
+boot via `--model <alias-or-full-name>`. Run `claude --help | grep
+-A1 model` to see the syntax. To enumerate the catalog, check
+[Anthropic's docs][anthropic-models] or run `claude` once and let it
+state the active model in the banner; for anything unfamiliar, follow
+the "Picking a model" procedure above (search what each alias resolves
+to before pinning it).
 
 **Slash commands inside the TUI:** `/help` lists them; the common ones
 are agent-management and project-management commands rather than model
 switching (Claude switches model via the `--model` flag at boot or via
 the agents framework).
+
+[anthropic-models]: https://docs.anthropic.com/claude/docs/models-overview
 
 ### cmd (CommandCode — Kimi K2.6 / DeepSeek)
 
@@ -376,25 +410,29 @@ breakdown), `/usage` (credits + plan + metrics), `/status`,
 `Alt+P` quick model switch, `Ctrl+G` open input in external editor
 (`$EDITOR`), `Esc Esc` rewind.
 
-**Models in the cmd catalog (high-level — pick via `/model`):**
-- **Kimi K2.6** — Moonshot's default for cmd. Strong on general
-  coding, taste, and tool use. The user's persisted default.
-- **DeepSeek V4 Pro** — 1M-context model with hybrid attention. Use
-  when feeding a full repo or long traces.
-- **DeepSeek V4 Flash** — faster/cheaper sibling of V4 Pro.
-- **Step 3.5 Flash** — quick edits.
-- **GLM-5 / GLM-5.1** — Zhipu's flagship; GLM-5 is solid on
-  architecture/planning, GLM-5.1 on autonomous multi-step.
-- **Anthropic Claude models** (e.g. claude-opus-4-7) — only via the
-  `anthropic` provider auth path in cmd, NOT the default
-  `command-code` provider. Different auth flow; not in the default
-  picker.
+**Choosing a model:** apply the "Picking a model" procedure — open
+`/model` from the live pane, capture the picker output, and
+web-search any model name you don't recognize before picking. The
+catalog rotates often (Moonshot, DeepSeek, Zhipu, and Step families
+each get new releases on their own cadence) so this skill deliberately
+does not enumerate it.
+
+**User-specific anchor (stable):** the user's persisted default is
+**Kimi K2.6** — written into `~/.commandcode/config.json`'s `model`
+field at install time. That is a user preference, not a recommendation
+to always use Kimi. Pick based on the task.
+
+**Anthropic models inside cmd:** claude-family models (e.g.
+claude-opus-4-7) are reachable from cmd ONLY via the separate
+`anthropic` provider auth path, NOT the default `command-code`
+provider. They will not appear in the default `/model` picker. If the
+user wants them, that's a separate `cmd login` flow on the anthropic
+provider.
 
 When cmd hits its turn budget producing empty output (a known failure
-mode of Kimi K2.6 on multi-fetch research), either `/model` to a
-different cmd model or `endy handoff <task-id> --to opencode` — the
-new opencode task inherits the prompt and cmd's full output, no
-re-typing.
+mode on multi-fetch research), either `/model` to a different cmd
+model or `endy handoff <task-id> --to opencode` — the new opencode
+task inherits the prompt and cmd's full output, no re-typing.
 
 ### opencode (multi-provider, default `build` agent)
 
@@ -420,18 +458,17 @@ Endy passes `--dangerously-skip-permissions` for `--full-auto`.
 - `-s, --session <id>` — by id.
 - `--fork` — fork the session when continuing.
 
-**Available models (default `opencode` provider — May 2026):**
-- `opencode/big-pickle` — default for the `build` agent, no extra auth.
-  General coding workhorse.
-- `opencode/deepseek-v4-flash-free` — fast, free tier.
-- `opencode/minimax-m2.5-free` — alternative free option, good for
-  exploration.
-- `opencode/nemotron-3-super-free` — Nvidia Nemotron family.
-- `opencode/qwen3.6-plus-free` — Alibaba Qwen.
+**Choosing a model:** opencode is one of the few CLIs that exposes a
+headless enumeration — **`opencode models`** prints every model
+currently installed, one per line, in `provider/model` form. Run it
+once and pick. For provider-bundled models you don't recognize (the
+default `opencode` provider rotates its free-tier offerings), apply
+the "Picking a model" procedure — web-search the model name before
+pinning it.
 
-These are the models bundled in the opencode provider. Other providers
-(Anthropic, OpenAI, OpenRouter, Nous, etc.) become available once
-`opencode auth login` is run for them.
+Other providers (Anthropic, OpenAI, OpenRouter, Nous, etc.) become
+available once `opencode auth login` is run for them; their models
+then show up in `opencode models` too.
 
 **Subcommands worth knowing:** `opencode models` (list), `opencode
 stats` (token usage + cost), `opencode session` (manage sessions),
@@ -483,6 +520,12 @@ hook scripts).
 **Skills:** `-s, --skills <name>` preloads one or more skills for the
 session (rough analogue of personas). Repeatable or comma-separated.
 
+**Choosing a model:** `hermes model` opens an interactive picker for
+BOTH default model and provider — that is the source of truth for
+what's available against your current auth. Capture the picker
+output, web-search any unfamiliar model name, then confirm.
+`hermes status` reports the currently active model + provider.
+
 **Subcommand surface (large — `hermes -h` for the full list):** `chat`,
 `model`, `fallback`, `gateway`, `proxy`, `lsp`, `setup`, `whatsapp`,
 `slack`, `cron`, `webhook`, `kanban`, `hooks`, `doctor`, `dump`,
@@ -529,12 +572,12 @@ Endy passes `-y, --yolo` for `--full-auto` (equivalent to
 - `yolo` — auto-approve everything.
 - `plan` — read-only, no edits or shell.
 
-**Available models (May 2026):**
-- `gemini-3.1-pro-preview` — newest preview tier, used by Hermes auto
-  when configured.
-- `gemini-2.5-pro` — production flagship.
-- `gemini-2.5-flash` — fast/cheap variant for trivial work.
-- `gemini-2.5-pro-experimental` — feature preview.
+**Choosing a model:** apply the "Picking a model" procedure — open
+`/model` from the live pane, web-search any unfamiliar name. Google
+ships preview / experimental / flash variants on their own cadence;
+the picker is the only authoritative source for what's available
+against your current auth (API key vs. Vertex vs. GCA each see
+different subsets).
 
 The free tier has a daily quota; on exhaustion, stderr surfaces
 `RESOURCE_EXHAUSTED` and the request fails. That signal is what Phase
@@ -593,12 +636,12 @@ field on the fly. Examples from `codex --help`:
 `~/.codex/config.toml`. Useful when you keep separate "review" and
 "build" profiles.
 
-**Models (OpenAI Responses tier — May 2026):**
-- `o3` — flagship reasoning, default for substantial work.
-- `gpt-5` / `gpt-5.1` — newer flagships when available on the user's
-  plan.
-- `gpt-5.1-codex` — codex-tuned variant.
-- Pin model per session via `-m` or persist in `config.toml`.
+**Choosing a model:** codex does not switch in-session — you pin at
+boot via `-m <model>` or persist via `-c model="..."` (TOML override).
+The catalog is OpenAI's Responses-API model surface and rotates as
+OpenAI releases new tiers; check OpenAI's docs or your account's
+available-models list rather than relying on a static enumeration here.
+Apply the "Picking a model" procedure for anything unfamiliar.
 
 ---
 
