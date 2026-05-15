@@ -27,7 +27,33 @@ _endy_complete() {
               watch web spawn ask chat handoff help \
               codex opencode cmd commandcode hermes claude gemini"
 
+  # Enumerate task ids from every endy install we can locate. Earlier
+  # versions hardcoded $HOME/Downloads/endy/.logs, which did not match the
+  # npm-installed layout (<install>/.logs/per-dir/<session>/task-*.meta)
+  # and broke id completion entirely. This helper walks the endy binary
+  # back to its install root and then globs every per-dir/* under it.
+  _endy_collect_task_ids() {
+    local roots=() endy_bin endy_real endy_root r
+    endy_bin="$(command -v endy 2>/dev/null)"
+    if [[ -n "$endy_bin" ]]; then
+      endy_real="$(readlink -f "$endy_bin" 2>/dev/null || printf '%s\n' "$endy_bin")"
+      endy_root="$(dirname "$(dirname "$endy_real")")"
+      [[ -d "$endy_root/.logs" ]] && roots+=("$endy_root/.logs")
+    fi
+    [[ -n "${ENDY_LOGS_DIR:-}" && -d "$ENDY_LOGS_DIR" ]] && roots+=("$ENDY_LOGS_DIR")
+    [[ -d "$HOME/Downloads/endy/.logs" ]] && roots+=("$HOME/Downloads/endy/.logs")
+    local out=""
+    for r in "${roots[@]}"; do
+      out+="$(find "$r" -maxdepth 3 -name 'task-*.meta' 2>/dev/null \
+              | sed -E 's|.*/task-([0-9]+-[0-9]+-[0-9a-f]+)\.meta|\1|') "
+    done
+    printf '%s' "$out"
+  }
+
   local agents="codex opencode cmd hermes claude gemini"
+  # spawn / chat / handoff also accept the offline `bash` stub for smoke
+  # tests of the runtime without burning real-agent credits.
+  local spawn_agents="codex opencode cmd hermes claude gemini bash"
   local watch_subs="list tree dir log chat attach panel browse follow view followup kill kill-all gc purge delete purge-session"
   local help_topics="opencode cmd hermes claude gemini tmux"
   local web_opts="--localhost --host --port --token"
@@ -45,7 +71,13 @@ _endy_complete() {
   case "$sub" in
     spawn|ask|chat)
       if [[ "$cword" -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "$agents" -- "$cur") )
+        # ask is one-shot blocking, the offline `bash` stub has nothing to
+        # answer there. spawn/chat use it for runtime smoke tests.
+        if [[ "$sub" == "ask" ]]; then
+          COMPREPLY=( $(compgen -W "$agents" -- "$cur") )
+        else
+          COMPREPLY=( $(compgen -W "$spawn_agents" -- "$cur") )
+        fi
         return 0
       fi
       case "$prev" in
@@ -67,13 +99,8 @@ _endy_complete() {
         --reason|--instructions|--lines) COMPREPLY=(); return 0 ;;
       esac
       if [[ "$cword" -eq 2 ]]; then
-        local logs_dir="${ENDY_LOGS_DIR:-$HOME/Downloads/endy/.logs}"
-        if [[ -d "$logs_dir" ]]; then
-          local ids
-          ids="$(ls -1 "$logs_dir"/task-*.meta 2>/dev/null \
-                 | sed -E 's|.*/task-([0-9]+-[0-9]+-[0-9a-f]+)\.meta|\1|')"
-          COMPREPLY=( $(compgen -W "$ids" -- "$cur") )
-        fi
+        local ids; ids="$(_endy_collect_task_ids)"
+        COMPREPLY=( $(compgen -W "$ids" -- "$cur") )
         return 0
       fi
       COMPREPLY=( $(compgen -W "$handoff_opts" -- "$cur") )
@@ -93,14 +120,8 @@ _endy_complete() {
           COMPREPLY=( $(compgen -d -- "$cur") )
           ;;
         log|view|follow|chat|attach|kill|followup|purge|delete|purge-session)
-          # Task ID — list from .logs
-          local ids
-          local logs_dir="${ENDY_LOGS_DIR:-$HOME/Downloads/endy/.logs}"
-          if [[ -d "$logs_dir" ]]; then
-            ids="$(ls -1 "$logs_dir"/task-*.meta 2>/dev/null \
-                   | sed -E 's|.*/task-([0-9]+-[0-9]+-[0-9a-f]+)\.meta|\1|')"
-            COMPREPLY=( $(compgen -W "$ids" -- "$cur") )
-          fi
+          local ids; ids="$(_endy_collect_task_ids)"
+          COMPREPLY=( $(compgen -W "$ids" -- "$cur") )
           ;;
         kill-all)
           COMPREPLY=( $(compgen -W "--agent --cwd --orch --done --everything" -- "$cur") )
