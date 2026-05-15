@@ -210,6 +210,7 @@ yourself.
 
 ## Documentation
 
+- [docs/kickoff.md](docs/kickoff.md) — onboarding for a new agent or contributor: architecture, conventions, design principles to preserve, anti-patterns we've already burned on
 - [docs/operations.md](docs/operations.md) — full command reference, manager workflows, the `endy watch` family, the `.logs/` contract, web dashboard internals
 - [docs/cli-gotchas.md](docs/cli-gotchas.md) — per-CLI quirks (`opencode --dir`, `cmd --max-turns`, `hermes -Q`, tmux specifics)
 - [docs/demo.md](docs/demo.md) — script for recording the handoff GIF, beat-by-beat
