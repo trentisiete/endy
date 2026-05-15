@@ -519,6 +519,8 @@ cmd_list() {
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
     local kind;        kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
     local parent;      parent="$(meta_field "$m" parent_task)"
+    local handoff_from;   handoff_from="$(meta_field "$m" handoff_from)"
+    local handoff_reason; handoff_reason="$(meta_field "$m" handoff_reason)"
     local orch;        orch="$(task_orchestrator "$m")"
     local orch_label;  orch_label="$(task_orchestrator_label "$m")"
     local model;       model="$(model_label "$m" "$log" "$agent")"
@@ -528,6 +530,10 @@ cmd_list() {
     found=1
     local parent_short="—"
     [[ -n "$parent" ]] && parent_short="$(short_task_ref "$parent")"
+    # If this task came via handoff, prefer showing the handoff source in the
+    # PARENT column (it's almost always more informative than the spawn
+    # parent for a continuation task).
+    [[ -n "$handoff_from" ]] && parent_short="↪$(short_task_ref "$handoff_from")"
 
     # spawned_iso is ISO-8601 UTC like 2026-05-05T10:18:27Z. Uses _endy_iso_to_epoch (portable).
     local spawned_epoch
@@ -568,6 +574,13 @@ cmd_list() {
     printf '%b%-22s%b %b%-9s%b %-13s %b%-14s%b %b%-9s%b %-16s %-30s %-7s %s\n' \
       "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$parent_short" \
       "$C_MAG" "$orch_label" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$cwd_short" "$runtime" "$last"
+    # Handoff badge: explicit one-liner under the row when this task is the
+    # continuation of another. Keeps the table aligned and surfaces the
+    # reason without forcing a wider table.
+    if [[ -n "$handoff_from" ]]; then
+      printf '  %b↪ handoff from %s%b%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
+        "${handoff_reason:+  ${C_DIM}·${C_RST} ${handoff_reason}}"
+    fi
   done < <(_iter_meta_files)
 
   if [[ "$found" == "0" ]]; then
@@ -994,6 +1007,8 @@ cmd_tree() {
     cwd_matches_filter "$cwd" "$cwd_filter" || continue
     [[ -z "$orch_filter" || "$orch" == "$orch_filter" ]] || continue
     local parent; parent="$(meta_field "$m" parent_task)"; parent="${parent:-—}"
+    local handoff_from;   handoff_from="$(meta_field "$m" handoff_from)"
+    local handoff_reason; handoff_reason="$(meta_field "$m" handoff_reason)"
     local spawned_iso; spawned_iso="$(meta_field "$m" spawned_at)"
     local spawned_epoch; spawned_epoch="$(_endy_iso_to_epoch "$spawned_iso")"
     local runtime="?"
@@ -1008,7 +1023,7 @@ cmd_tree() {
               | head -c 90)"
       [[ -z "$last" ]] && last="(empty)"
     fi
-    rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${task_session}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}")
+    rows+=("${orch_label}"$'\t'"${orch_label}"$'\t'"${cwd}"$'\t'"${task_session}"$'\t'"${id}"$'\t'"${status}"$'\t'"${agent}"$'\t'"${model}"$'\t'"${kind}"$'\t'"${parent}"$'\t'"${runtime}"$'\t'"${last}"$'\t'"${handoff_from}"$'\t'"${handoff_reason}")
   done < <(_iter_meta_files)
 
   # --- Live panes (endy live open) ---
@@ -1050,7 +1065,7 @@ cmd_tree() {
         [[ -z "$llast" ]] && llast="(idle)"
       fi
       local lid="live:${lsess}:${lname}"
-      rows+=("${lsess}"$'\t'"${lsess}"$'\t'"${lcwd}"$'\t'"${lsess}"$'\t'"${lid}"$'\t'"${lstatus}"$'\t'"${lagent}"$'\t'"${lmodel}"$'\t'"live"$'\t'"—"$'\t'"${lruntime}"$'\t'"${llast}")
+      rows+=("${lsess}"$'\t'"${lsess}"$'\t'"${lcwd}"$'\t'"${lsess}"$'\t'"${lid}"$'\t'"${lstatus}"$'\t'"${lagent}"$'\t'"${lmodel}"$'\t'"live"$'\t'"—"$'\t'"${lruntime}"$'\t'"${llast}"$'\t'""$'\t'"")
     done
     shopt -u nullglob
   done < <(_aggregate_log_dirs)
@@ -1107,7 +1122,7 @@ cmd_tree() {
                   | awk '/[[:alnum:]]/ { line=$0 } END { print line }' | head -c 90)"
       [[ -z "$twlast" ]] && twlast="(idle)"
 
-      rows+=("${tsess}"$'\t'"${tsess}"$'\t'"${wpath}"$'\t'"${tsess}"$'\t'"${wname}"$'\t'"running"$'\t'"${twagent}"$'\t'"—"$'\t'"tmux"$'\t'"—"$'\t'"${twruntime}"$'\t'"${twlast}")
+      rows+=("${tsess}"$'\t'"${tsess}"$'\t'"${wpath}"$'\t'"${tsess}"$'\t'"${wname}"$'\t'"running"$'\t'"${twagent}"$'\t'"—"$'\t'"tmux"$'\t'"—"$'\t'"${twruntime}"$'\t'"${twlast}"$'\t'""$'\t'"")
     done < <(tmux list-windows -t "$tsess" -F '#W'$'\t''#{pane_current_command}'$'\t''#{pane_current_path}'$'\t''#{window_activity}' 2>/dev/null)
   done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^endy(-|$)' || true)
 
@@ -1124,7 +1139,7 @@ cmd_tree() {
 
   local last_orch=""
   local last_cwd_key=""
-  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 -k5,5 | while IFS=$'\t' read -r orch orch_label cwd task_session id status agent model kind parent runtime last; do
+  printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1 -k3,3 -k4,4 -k5,5 | while IFS=$'\t' read -r orch orch_label cwd task_session id status agent model kind parent runtime last handoff_from handoff_reason; do
     if [[ "$orch" != "$last_orch" ]]; then
       [[ -n "$last_orch" ]] && printf '\n'
       printf '%bORCH%b %b%s%b\n' "$C_DIM" "$C_RST" "$C_MAG$C_BOLD" "$orch_label" "$C_RST"
@@ -1145,6 +1160,13 @@ cmd_tree() {
     else
       printf '    %b%-22s%b %b%-9s%b %b%-9s%b %-16s %-5s %-7s parent:%s  %s\n' \
         "$C_BOLD" "$id" "$C_RST" "$sc" "$status" "$C_RST" "$C_BLU" "$agent" "$C_RST" "$model" "$kind" "$runtime" "$(short_task_ref "$parent")" "$last"
+    fi
+    # If this task is a handoff continuation, label the relationship visually.
+    # The previous-agent ↪ this-agent arrow is what makes the chain readable
+    # in a single glance.
+    if [[ -n "$handoff_from" ]]; then
+      printf '      %b↪ handoff from %s%b%s\n' "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
+        "${handoff_reason:+  ${C_DIM}·${C_RST} ${handoff_reason}}"
     fi
     [[ "$agent" == "codex" || "$agent" == "opencode" ]] && _endy_print_agent_stats_line "      " "$agent" "$cwd"
   done
