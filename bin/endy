@@ -19,6 +19,17 @@
 #   endy status                       Show tmux + Codex MCP + Tailscale status.
 #   endy doctor                       Check python3, tmux, installed agents, config, and sessions.
 #
+# State
+#   endy state [--task-id <id>] [--format <json|human|prompt>]
+#                                     Snapshot of the agent's environment:
+#                                     self, handoff chain, peers in the same
+#                                     and other endy sessions, tier headroom
+#                                     for codex/opencode (and Phase-2 stubs).
+#                                     Without --task-id, self-detects via tmux.
+#                                     Used by spawn-long-task.sh to prepend a
+#                                     '## endy environment' block to every
+#                                     spawn prompt; bypass with --no-state.
+#
 # Agents (interactive — current cwd is the agent's project root)
 #   endy codex [args]                 Start a Codex session here. Endy context is loaded
 #                                     globally via ~/.codex/AGENTS.md (see 'endy install').
@@ -242,6 +253,7 @@ run_agent() {
 # ---------------------------------------------------------------------------
 
 cmd_install()  { exec "${SCRIPTS}/install.sh" "$@"; }
+cmd_state()    { exec python3 "${SCRIPTS}/state.py" "$@"; }
 cmd_start()    { exec "${SCRIPTS}/start.sh"   --mode=per-dir "$@"; }
 cmd_overview() {
   # Global aggregator — equivalent to today's `endy start`. Forces session "endy".
@@ -393,9 +405,20 @@ cmd_orchestrator() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -h|--help)
+        cat <<'EOF'
+usage: endy orchestrator [name] [--agent <codex|opencode|cmd|hermes|gemini>]
+                         [--cwd <dir>] [--no-attach]
+
+Opens an additional orchestrator window in the current tmux session.
+Default name = basename of cwd. Default agent = codex.
+EOF
+        return 0 ;;
       --agent)     agent="$2"; shift 2 ;;
       --cwd|--dir) cwd="$2"; shift 2 ;;
       --no-attach) attach=0; shift ;;
+      --) shift; break ;;
+      -*) die "unknown flag: $1 (try 'endy orchestrator --help')" ;;
       *)           if [[ -z "$name" ]]; then name="$1"; else die "unexpected arg: $1"; fi; shift ;;
     esac
   done
@@ -600,6 +623,7 @@ case "${1:-help}" in
   stop)     shift; cmd_stop "$@" ;;
   status)   shift; cmd_status "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;
+  state)    shift; cmd_state "$@" ;;
   watch)    shift; cmd_watch "$@" ;;
   web)      shift; cmd_web "$@" ;;
   spawn)    shift; cmd_spawn "$@" ;;

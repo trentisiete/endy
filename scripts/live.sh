@@ -298,33 +298,22 @@ cmd_live_close() {
 cmd_live_list() {
   require_session
 
-  # System window name prefixes to exclude
-  local system_prefixes="orchestrator watch browse docs tree sessions agents help opencode logs panel task- chat- follow-"
-
-  local excluded_pattern=""
-  for pfx in $system_prefixes; do
-    excluded_pattern="${excluded_pattern}${pfx}|"
+  # A "live pane" is a tmux window opened by `endy live open` and recorded
+  # in a live-<name>.meta. Listing tmux windows and then negating by name
+  # is fragile: every new management window has to be added to the
+  # exclusion list (we just hit this with the `list` window in 0.5.x). So
+  # walk the meta files directly — that's the only source of truth.
+  shopt -s nullglob
+  local lm wname agent cwd
+  for lm in "${LOG_DIR}"/live-*.meta; do
+    wname="$(basename "$lm" .meta | sed 's/^live-//')"
+    # Only show entries whose tmux window is still alive.
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qxF "$wname" || continue
+    agent="$(grep '^agent=' "$lm" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    cwd="$(grep '^cwd=' "$lm" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    printf '%s\t%s\t%s\n' "$wname" "${agent:-?}" "${cwd:-?}"
   done
-  excluded_pattern="${excluded_pattern%|}"
-
-  while IFS= read -r wname; do
-    # Skip system windows
-    [[ "$wname" =~ ^($excluded_pattern) ]] && continue
-
-    local target="${SESSION}:${wname}"
-    local meta_file="${LOG_DIR}/live-${wname}.meta"
-    local agent="?" cwd="?"
-
-    if [[ -f "$meta_file" ]]; then
-      agent="$(grep '^agent=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-      cwd="$(grep '^cwd=' "$meta_file" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-    fi
-
-    agent="${agent:-?}"
-    cwd="${cwd:-?}"
-
-    printf '%s\t%s\t%s\n' "$wname" "$agent" "$cwd"
-  done < <(tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null)
+  shopt -u nullglob
 }
 
 cmd_live_status() {
