@@ -133,9 +133,9 @@ Will modify (with backup):
   ${CODEX_CONFIG}   (append/replace endy v0.1 block)
 
 Will also bootstrap multiplexor (the routing policy for endy handoff):
-  pip install --user multiplexor   (from PyPI or local clone, if not present)
-  multiplexor init                 (creates ~/.config/multiplexor/config.yaml)
-  ENDY_HANDOFF_RESOLVER            (export added to your shell rc)
+  pip install --user endy-multiplexor   (from PyPI or local clone, if not present)
+  multiplexor init                      (creates ~/.config/multiplexor/config.yaml)
+  ENDY_HANDOFF_RESOLVER                 (export added to your shell startup)
   (pass --no-multiplexor to skip)
 
 EOF
@@ -454,10 +454,15 @@ if [[ "$INSTALL_MULTIPLEXOR" == "1" ]]; then
   multiplexor_install_status="skipped"
   multiplexor_install_reason=""
 
-  # Locate a source for multiplexor. Order: explicit env, sibling dir, GitHub.
-  # The sibling-dir path keeps the developer workflow snappy.
+  # Locate a source for multiplexor. Order: explicit env, sibling dir, PyPI.
+  # The sibling-dir path keeps the developer workflow snappy. PyPI is the
+  # default for end users (`pip install endy-multiplexor` — the plain
+  # `multiplexor` name on PyPI is owned by an unrelated 2020 websockets
+  # package). GitHub URL stays as a last-resort fallback in case PyPI is
+  # down or the user has a custom index.
   MULTIPLEXOR_SRC=""
-  MULTIPLEXOR_REMOTE="git+https://github.com/trentisiete/multiplexor"
+  MULTIPLEXOR_REMOTE="endy-multiplexor"
+  MULTIPLEXOR_REMOTE_FALLBACK="git+https://github.com/trentisiete/multiplexor"
   if [[ -n "${MULTIPLEXOR_REPO:-}" && -f "${MULTIPLEXOR_REPO}/pyproject.toml" ]]; then
     MULTIPLEXOR_SRC="$MULTIPLEXOR_REPO"
   elif [[ -f "${ENDY_ROOT}/../multiplexor/pyproject.toml" ]]; then
