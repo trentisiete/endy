@@ -350,6 +350,21 @@ _endy_detect_pane_agent() {
   printf '%s' "$wcmd"
 }
 
+# Strip the `## endy environment` ... `---` injected block from a stream so
+# peek's body shows what the agent actually said, not the prompt prelude.
+# stub agents output nothing else, so without this their preview is just
+# the env block over and over. awk gates: skip from the marker line until
+# the closing `---` separator the spawn writer adds, then resume.
+_endy_strip_env_block() {
+  awk '
+    /^\[stub agent — prompt follows\]$/ { next }
+    /^## endy environment$/ { skipping=1; next }
+    skipping && /^---$/      { skipping=0; next }
+    skipping                  { next }
+                              { print }
+  '
+}
+
 # Stable color rotation for session blocks. Same name → same color across
 # refreshes, so a session keeps its visual identity. Falls back to no color
 # when the caller has no ANSI palette (C_RST unset → NO_COLOR or non-tty
@@ -690,11 +705,13 @@ cmd_list_picker() {
   elif command -v clip.exe >/dev/null 2>&1; then copy_cmd="clip.exe"
   fi
 
-  local fzf_header=$' enter\xe2\x80\x82log   ctrl-v\xe2\x80\x82view   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   esc\xe2\x80\x82salir'
+  local fzf_header=$' enter\xe2\x80\x82tmux pane   ctrl-l\xe2\x80\x82log   ctrl-v\xe2\x80\x82view   ctrl-y\xe2\x80\x82copy id   ctrl-k\xe2\x80\x82kill   ctrl-x\xe2\x80\x82clean abandoned   esc\xe2\x80\x82salir'
   local binds=(
-    --bind "enter:execute(${ENDY_ROOT}/bin/endy watch log {2})"
+    --bind "enter:execute(${ENDY_ROOT}/bin/endy watch attach {2})+abort"
+    --bind "ctrl-l:execute(${ENDY_ROOT}/bin/endy watch log {2})"
     --bind "ctrl-v:execute(${ENDY_ROOT}/bin/endy watch view {2})"
     --bind "ctrl-k:execute(${ENDY_ROOT}/bin/endy watch kill {2})+abort"
+    --bind "ctrl-x:execute(${ENDY_ROOT}/bin/endy watch clean-abandoned)+abort"
   )
   if [[ -n "$copy_cmd" ]]; then
     binds+=(--bind "ctrl-y:execute-silent(printf %s {2} | ${copy_cmd})")
@@ -1555,23 +1572,37 @@ cmd_peek() {
   local _W="${ENDY_PEEK_WIDTH:-60}"
   local _RULE; _RULE="$(printf '─%.0s' $(seq 1 "$_W"))"
 
-  # Live pane row (from browse): chip arriba + tmux capture del pane.
+  # Live pane row (from browse): caja meta arriba + tmux capture del pane.
   if [[ "$prefix" == live:* ]]; then
     local payload="${prefix#live:}"
     local lsess="${payload%%:*}"
     local lname="${payload#*:}"
     local lcolor; lcolor="$(_endy_session_color "$lsess")"
-    printf '%s╭%s%s\n' "$lcolor" "$_RULE" "$C_RST"
-    printf '%s│%s %s  %slive:%s%s%s  %s· %s%s\n' \
-      "$lcolor" "$C_RST" \
-      "$(_endy_status_bullet running)" \
-      "$C_BOLD" "$lname" "$C_RST" \
-      "$C_DIM" "$lsess" "$C_RST" "" ""
+    local llabel=" ${lsess} "
+    local lbar_right=$(( _W - 3 - ${#llabel} ))
+    [[ "$lbar_right" -lt 1 ]] && lbar_right=1
+    printf '%s╭──%s%s%s%s%s\n' \
+      "$lcolor" "$C_BOLD" "$llabel" "$C_RST" \
+      "$lcolor" "$(printf '─%.0s' $(seq 1 "$lbar_right"))${C_RST}"
+
+    # Detect agent inside the pane for the meta card.
+    local lwcmd=""
+    lwcmd="$(tmux display -p -t "${lsess}:${lname}" '#{pane_current_command}' 2>/dev/null)"
+    local lagent; lagent="$(_endy_detect_pane_agent "${lsess}:${lname}" "$lname" "${lwcmd:-bash}")"
+    [[ "$lagent" == "shell" ]] && lagent="$lname"
+
+    local kvfmt='%s│%s   %s%-9s%s  %s\n'
+    printf "$kvfmt" "$lcolor" "$C_RST" "$C_DIM" "id"      "$C_RST" "${C_BOLD}live:${lname}${C_RST}"
+    printf "$kvfmt" "$lcolor" "$C_RST" "$C_DIM" "session" "$C_RST" "${lsess}"
+    printf "$kvfmt" "$lcolor" "$C_RST" "$C_DIM" "agent"   "$C_RST" "${C_BOLD}${lagent}${C_RST}"
+    printf "$kvfmt" "$lcolor" "$C_RST" "$C_DIM" "kind"    "$C_RST" "live pane (interactive)"
     printf '%s╰%s%s\n\n' "$lcolor" "$_RULE" "$C_RST"
+
+    printf '%s── output del agente ──%s\n\n' "$C_DIM" "$C_RST"
     if tmux has-session -t "$lsess" 2>/dev/null \
          && tmux list-windows -t "$lsess" -F '#W' 2>/dev/null | grep -qxF "$lname"; then
       tmux capture-pane -t "${lsess}:${lname}" -p -e -S -200 2>/dev/null \
-        | tail -n 80 | head -c 32768
+        | _endy_strip_env_block | tail -n 60 | head -c 32768
     else
       printf '  %s(window cerrada)%s\n' "$C_DIM" "$C_RST"
     fi
@@ -1637,53 +1668,57 @@ cmd_peek() {
 
   local sess_color; sess_color="$(_endy_session_color "$task_session")"
   local bullet; bullet="$(_endy_status_bullet "$status")"
+  local cwd_short="${cwd:-—}"
+  [[ ${#cwd_short} -gt $((_W - 14)) ]] && cwd_short="…${cwd_short: -$((_W - 16))}"
 
-  # ── chip arriba: id · status · agent · runtime · cwd ──
-  # Estilo de pastilla con bordes redondeados, una sola línea visualmente
-  # densa que el ojo capta en un instante.
-  printf '%s╭%s%s\n' "$sess_color" "$_RULE" "$C_RST"
-  printf '%s│%s %s  %s%s%s  %s· %s%s  %s· %s%-9s%s' \
-    "$sess_color" "$C_RST" \
-    "$bullet" \
-    "$C_BOLD" "$id" "$C_RST" \
-    "$C_DIM" "$status" "$C_RST" \
-    "$C_DIM" "$C_BOLD" "$agent" "$C_RST"
-  [[ -n "$persona" && "$persona" != "—" ]] && printf '%s[%s]%s' "$C_DIM" "$persona" "$C_RST"
-  printf '  %s· %s%s\n' "$C_DIM" "$runtime" "$C_RST"
-  printf '%s│%s %s%s · %s · %s%s\n' \
-    "$sess_color" "$C_RST" \
-    "$C_DIM" "$task_session" \
-    "${cwd:-—}" \
-    "${model:+· $model}" "$C_RST"
+  # ── card meta arriba — caja completa con borde, datos como rows clave/valor ──
+  # Borde superior con la sesión como label inline.
+  local sess_label_visible="${sess_color}${C_BOLD} ${task_session} ${C_RST}"
+  local label_text=" ${task_session} "
+  local label_len=${#label_text}
+  local bar_left=2
+  local bar_right=$(( _W - bar_left - label_len ))
+  [[ "$bar_right" -lt 1 ]] && bar_right=1
+  printf '%s╭%s%s%s%s\n' \
+    "$sess_color" "$(printf '─%.0s' $(seq 1 "$bar_left"))" \
+    "$sess_label_visible" \
+    "$sess_color" "$(printf '─%.0s' $(seq 1 "$bar_right"))${C_RST}"
+
+  # Una key/value por línea, con el bullet de estado como "icono" en el row del status.
+  local kvfmt='%s│%s   %s%-9s%s  %s\n'
+  printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "id"      "$C_RST" "${C_BOLD}${id}${C_RST}"
+  printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "status"  "$C_RST" "${bullet}  ${status}"
+  printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "agent"   "$C_RST" "${C_BOLD}${agent:-?}${C_RST}${persona:+ ${C_DIM}[$persona]${C_RST}}${model:+  ${C_DIM}·${C_RST} ${model}}"
+  printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "runtime" "$C_RST" "$runtime"
+  printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "cwd"     "$C_RST" "${cwd_short}"
   if [[ -n "$handoff_from" ]]; then
-    printf '%s│%s %s↪ handoff from %s%s%s\n' \
-      "$sess_color" "$C_RST" \
-      "$C_DIM" "$(short_task_ref "$handoff_from")" "$C_RST" \
-      "${handoff_reason:+ ${C_DIM}· ${handoff_reason}${C_RST}}"
+    printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "handoff" "$C_RST" "↪ from $(short_task_ref "$handoff_from")${handoff_reason:+ ${C_DIM}· ${handoff_reason}${C_RST}}"
   fi
   if [[ "$agent" == "codex" || "$agent" == "opencode" ]]; then
-    local stats; stats="$(_endy_print_agent_stats_line "│ " "$agent" "$cwd")"
-    [[ -n "$stats" ]] && printf '%s%s%s' "$sess_color" "${stats}" "$C_RST"
+    local stats; stats="$(_endy_print_agent_stats_line "" "$agent" "$cwd")"
+    if [[ -n "$stats" ]]; then
+      # strip leading whitespace from the stats line so it aligns with the values column
+      stats="${stats#"${stats%%[! ]*}"}"
+      printf "$kvfmt" "$sess_color" "$C_RST" "$C_DIM" "usage" "$C_RST" "$stats"
+    fi
   fi
   printf '%s╰%s%s\n' "$sess_color" "$_RULE" "$C_RST"
 
-  # ── body: el TUI vivo del agente si la window existe, si no el log ──
-  printf '\n'
+  # ── separador con label "agent output" ──
+  printf '\n%s── output del agente ──%s\n\n' "$C_DIM" "$C_RST"
+
+  # ── body: el TUI vivo si la window existe, si no el log filtrado ──
   local target="${task_session}:${task_window}"
   if tmux has-session -t "$task_session" 2>/dev/null \
        && tmux list-windows -t "$task_session" -F '#W' 2>/dev/null \
             | grep -qxF "$task_window"; then
-    # Capture-pane con -e preserva los códigos ANSI del propio TUI del
-    # agente. Le pasamos los últimos 200 lines y dejamos que fzf lo
-    # renderice tal cual. El head -c es defensivo: algunos panes con
-    # mucha historia escupirían MB enteros.
     tmux capture-pane -t "$target" -p -e -S -200 2>/dev/null \
-      | tail -n 80 \
+      | _endy_strip_env_block \
+      | tail -n 60 \
       | head -c 32768
   elif [[ -f "$log" ]]; then
-    printf '  %s(window cerrada — mostrando log)%s\n\n' "$C_DIM" "$C_RST"
     grep -vE '^(ENDY_EXIT=|\[endy-watch\])' "$log" 2>/dev/null \
-      | tail -n 30 | tr -d '\r'
+      | _endy_strip_env_block | tail -n 60 | tr -d '\r'
   else
     printf '  %s(no window, no log)%s\n' "$C_DIM" "$C_RST"
   fi
@@ -2621,6 +2656,89 @@ cmd_gc() {
 # purge — delete a task family from .logs/ and kill its tmux windows
 # ---------------------------------------------------------------------------
 
+cmd_clean_abandoned() {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+usage: endy watch clean-abandoned [--dry-run] [-y|--yes]
+
+Purges every task in state ABANDONED, DONE-ERR, or FAIL across every
+session: removes its .meta / .log / .prompt.md from .logs/ and closes
+the tmux window if it still exists. DONE tasks are kept (they finished
+correctly).
+
+  --dry-run     show what would be removed without touching anything
+  -y, --yes     skip the confirmation prompt
+EOF
+    return 0
+  fi
+  local dry_run=0 yes=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      -y|--yes)  yes=1; shift ;;
+      *) echo "endy watch clean-abandoned: unknown arg: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  AGGREGATE=1
+  local victims=()
+  while IFS= read -r m; do
+    local id; id="$(basename "$m" .meta | sed 's/^task-//')"
+    local log; log="$(task_log_path "$m" "$id")"
+    local kind; kind="$(meta_field "$m" kind)"; kind="${kind:-spawn}"
+    local window; window="$(meta_field "$m" window)"
+    local task_session="${window%%:*}"
+    [[ -z "$task_session" || "$task_session" == "$window" ]] && task_session="$SESSION"
+    local status; status="$(log_status "$log" "$id" "$kind" "$task_session")"
+    case "$status" in
+      ABANDONED|DONE-ERR|FAIL\(*\)) victims+=("${id}|${m}|${log}|${window}|${status}") ;;
+    esac
+  done < <(_iter_meta_files)
+
+  if [[ "${#victims[@]}" -eq 0 ]]; then
+    printf '%s(no abandoned/error/failed tasks)%s\n' "$C_DIM" "$C_RST"
+    return 0
+  fi
+
+  printf '%s%d task(s) to clean:%s\n' "$C_BOLD" "${#victims[@]}" "$C_RST"
+  local v
+  for v in "${victims[@]}"; do
+    IFS='|' read -r id m log window status <<< "$v"
+    printf '  %s · %s%s%s\n' "$id" "$C_DIM" "$status" "$C_RST"
+  done
+
+  if [[ "$dry_run" == "1" ]]; then
+    printf '\n%s(--dry-run, nothing removed)%s\n' "$C_DIM" "$C_RST"
+    return 0
+  fi
+
+  if [[ "$yes" != "1" ]]; then
+    if [[ ! -t 0 ]]; then
+      printf '\n%scommit with: endy watch clean-abandoned --yes%s\n' "$C_DIM" "$C_RST"
+      return 0
+    fi
+    printf '\nproceed? type "yes" to confirm: '
+    local reply; read -r reply
+    [[ "$reply" == "yes" ]] || { echo "aborted"; return 0; }
+  fi
+
+  local removed=0 windows_closed=0
+  for v in "${victims[@]}"; do
+    IFS='|' read -r id m log window status <<< "$v"
+    local d; d="$(dirname "$m")"
+    rm -f "${d}/task-${id}.meta" "${d}/task-${id}.log" "${d}/task-${id}.prompt.md" \
+          "${d}/chat-${id}.meta" "${d}/chat-${id}.log"
+    removed=$((removed + 1))
+    if [[ -n "$window" ]] && tmux has-session -t "${window%%:*}" 2>/dev/null; then
+      if tmux list-windows -t "${window%%:*}" -F '#W' 2>/dev/null \
+           | grep -qxF "${window##*:}"; then
+        tmux kill-window -t "$window" 2>/dev/null && windows_closed=$((windows_closed + 1))
+      fi
+    fi
+  done
+  printf '\n%scleaned %d task(s), closed %d tmux window(s)%s\n' "$C_GRN" "$removed" "$windows_closed" "$C_RST"
+}
+
 cmd_purge() {
   local prefix=""
   local dry_run=0
@@ -2899,6 +3017,7 @@ case "${1:-attach}" in
   view)          shift; cmd_view "$@" ;;
   peek)          shift; cmd_peek "$@" ;;
   handoffs)      shift; cmd_handoffs "$@" ;;
+  clean-abandoned|clean) shift; cmd_clean_abandoned "$@" ;;
   follow)        shift; cmd_follow "$@" ;;
   chat)          shift; cmd_chat "$@" ;;
   _open)         shift; cmd_open "$@" ;;
