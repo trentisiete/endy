@@ -53,11 +53,35 @@ becomes optional and routing happens automatically when one tier runs dry.
 | Worker | `cmd` (CommandCode / Kimi K2.6) | ~€1 buys a lot of work | Strong taste reviewer; cheapest paid option |
 | Worker | `hermes` (Nous Research) | depends on backend (configurable per provider, incl. Copilot) | Tool-heavy agentic work |
 | Worker | `gemini` (Google Gemini CLI) | free daily quota | Wide reach |
-| Fallback | local model (Ollama, via [multiplexor][multiplexor]) | local | When everything else is exhausted |
 | Smoke testing | `bash` (offline stub) | free | Spawns a no-op window so you can rehearse handoff chains without burning real-agent credits |
 
 You only install the ones you want. `endy doctor` shows what is wired up
 and authenticated.
+
+### Local models (Ollama, LM Studio, …)
+
+endy does **not** spawn a local model directly — `endy spawn ollama` is
+deliberately not wired. Local inference is better treated as a backend
+behind an existing agent than as a peer-level CLI:
+
+- **Via `hermes`.** Hermes supports user-defined providers in
+  `~/.hermes/config.yaml` pointing at any OpenAI-compatible endpoint,
+  including ollama's `http://localhost:11434/v1`. Add the provider once,
+  then `endy spawn hermes --model "ollama/llama3.2"` (or whichever model
+  you've pulled) routes through hermes to your local ollama.
+- **Via `/model` inside a CLI that supports it.** cmd, codex, and
+  others expose local providers in their `/model` picker (codex has
+  `--oss --local-provider ollama` / `--local-provider lmstudio`; cmd
+  has an Ollama provider you can pick interactively). When the picker
+  opens, browse to the local provider, pick a pulled model, and the
+  CLI sends to your local daemon for that session.
+
+[multiplexor][multiplexor] also knows ollama as a local fallback at the
+routing layer — `multiplexor delegate "task"` may pick it when free
+tiers are exhausted — but the `multiplexor-next-provider` resolver used
+by `endy handoff` does NOT return ollama (endy can't drive it
+headlessly as a peer agent). The local-model story lives inside hermes
+and the `/model` slash command, not in endy's spawn surface.
 
 ## Quickstart
 
